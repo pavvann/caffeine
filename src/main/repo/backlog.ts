@@ -62,3 +62,46 @@ export function toggleItem(markdown: string, lineIndex: number): string {
   );
   return lines.join("\n");
 }
+
+/**
+ * Append `[LOOP-<iteration>]` tasks to BACKLOG.md, one per failure.
+ *
+ * Idempotent: if a line with the exact same `[LOOP-<iteration>]
+ * <failure>` text is already present (checked or unchecked), it is not
+ * duplicated. The check is whole-line: the same failure text under a
+ * different iteration counter still gets a fresh line, which is
+ * intentional — a failure recurring across iterations is signal worth
+ * surfacing.
+ *
+ * Always writes the file in LF (no trailing CRLF preservation) since
+ * the seed and toggleItem already operate on LF.
+ */
+export async function appendLoopTasks(
+  repoPath: string,
+  iteration: number,
+  failures: string[],
+): Promise<void> {
+  if (failures.length === 0) return;
+  const path = join(repoPath, FILENAME);
+  const existing = existsSync(path) ? await readFile(path, "utf8") : SEED;
+  const existingLines = existing.split(/\r?\n/);
+  const tag = `[LOOP-${iteration}]`;
+
+  const fresh: string[] = [];
+  for (const failure of failures) {
+    const line = `- [ ] ${tag} ${failure}`;
+    const already = existingLines.some(
+      (l) => l.replace(/^\s*[-*]\s+\[[ xX]\]\s+/, "").trim() ===
+        `${tag} ${failure}`,
+    );
+    if (!already) fresh.push(line);
+  }
+  if (fresh.length === 0) return;
+
+  // Ensure exactly one trailing newline before our additions; collapse
+  // an empty trailing line if present so we don't accumulate blank
+  // lines across iterations.
+  const trimmed = existing.replace(/\s*$/, "");
+  const next = trimmed + "\n\n" + fresh.join("\n") + "\n";
+  await writeFile(path, next, "utf8");
+}
