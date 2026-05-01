@@ -1,8 +1,12 @@
 import { useStore } from "../store";
 
-const ITEMS: Array<{ id: "session" | "backlog" | "state" | "settings"; label: string }> = [
+const ITEMS: Array<{
+  id: "session" | "backlog" | "pipeline" | "state" | "settings";
+  label: string;
+}> = [
   { id: "session", label: "Session" },
   { id: "backlog", label: "Backlog" },
+  { id: "pipeline", label: "Pipeline" },
   { id: "state", label: "State" },
   { id: "settings", label: "Settings" },
 ];

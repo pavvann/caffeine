@@ -3,6 +3,7 @@ import { useStore } from "./store";
 import { Sidebar } from "./components/Sidebar";
 import { Session } from "./views/Session";
 import { Backlog } from "./views/Backlog";
+import { Pipeline } from "./views/Pipeline";
 import { StateFile } from "./views/StateFile";
 import { ProjectPicker } from "./views/ProjectPicker";
 import { Settings } from "./views/Settings";
@@ -43,6 +44,7 @@ export function App() {
             <main className="flex-1 min-w-0">
               {view === "session" && <Session />}
               {view === "backlog" && <Backlog />}
+              {view === "pipeline" && <Pipeline />}
               {view === "state" && <StateFile />}
               {view === "settings" && <Settings />}
             </main>

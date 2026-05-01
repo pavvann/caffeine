@@ -5,6 +5,7 @@ import { clearCurrent, getCurrent, setCurrent } from "./agent/state";
 import { readBacklog, writeBacklog } from "./repo/backlog";
 import { readState, watchState } from "./repo/state";
 import { readConfig, writeConfig } from "./repo/config";
+import { readPipeline } from "./pipeline/parser";
 import {
   getLastSessionId,
   listProjects,
@@ -72,6 +73,14 @@ export function registerIpc(windowGetter: WindowGetter): void {
   ipcMain.handle(IPC.StateRead, async () => {
     if (!activeRepoPath) return "";
     return readState(activeRepoPath);
+  });
+  ipcMain.handle(IPC.PipelineRead, async () => {
+    if (!activeRepoPath) return null;
+    // Defensive: a malformed pipeline.md would throw PipelineParseError.
+    // For the read-only view we swallow that and return null so the UI
+    // shows "no pipeline" instead of crashing. Sessions still surface
+    // the error properly via runner.ts.
+    return readPipeline(activeRepoPath).catch(() => null);
   });
   ipcMain.handle(IPC.ConfigRead, async () => {
     if (!activeRepoPath) return {};

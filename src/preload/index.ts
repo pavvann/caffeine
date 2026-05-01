@@ -13,6 +13,9 @@ const api = {
   state: {
     read: () => ipcRenderer.invoke(IPC.StateRead),
   },
+  pipeline: {
+    read: () => ipcRenderer.invoke(IPC.PipelineRead),
+  },
   config: {
     read: () => ipcRenderer.invoke(IPC.ConfigRead),
     write: (cfg: unknown) => ipcRenderer.invoke(IPC.ConfigWrite, cfg),

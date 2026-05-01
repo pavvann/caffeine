@@ -61,7 +61,7 @@ type Store = {
   lastDecision: "done" | "loop" | "halt" | null;
 
   // view routing — single-session app, so a tiny enum is enough for now
-  view: "session" | "backlog" | "state" | "settings";
+  view: "session" | "backlog" | "pipeline" | "state" | "settings";
   setView: (v: Store["view"]) => void;
 
   ingest: (event: SessionEvent) => void;

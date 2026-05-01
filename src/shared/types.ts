@@ -136,6 +136,7 @@ export const IPC = {
   BacklogRead: "backlog:read",
   BacklogWrite: "backlog:write",
   StateRead: "state:read",
+  PipelineRead: "pipeline:read",
   ConfigRead: "config:read",
   ConfigWrite: "config:write",
   SessionStart: "session:start",
