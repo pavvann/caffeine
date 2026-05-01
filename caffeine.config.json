@@ -1,0 +1,8 @@
+{
+  "verification": {
+    "build": "pnpm build",
+    "typecheck": "pnpm typecheck",
+    "test": "pnpm test"
+  },
+  "costCeilingUsd": 25
+}
