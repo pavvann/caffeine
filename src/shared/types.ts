@@ -138,6 +138,8 @@ export const IPC = {
   StateRead: "state:read",
   PipelineRead: "pipeline:read",
   PipelineWrite: "pipeline:write",
+  PipelineReadRaw: "pipeline:read-raw",
+  PipelineWriteRaw: "pipeline:write-raw",
   ConfigRead: "config:read",
   ConfigWrite: "config:write",
   SessionStart: "session:start",

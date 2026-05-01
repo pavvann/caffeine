@@ -100,6 +100,39 @@ export function registerIpc(windowGetter: WindowGetter): void {
       };
     }
   });
+  ipcMain.handle(IPC.PipelineReadRaw, async () => {
+    if (!activeRepoPath) return null;
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      return await readFile(join(activeRepoPath, "pipeline.md"), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+      throw err;
+    }
+  });
+  ipcMain.handle(IPC.PipelineWriteRaw, async (_e, content: string) => {
+    if (!activeRepoPath) {
+      return { ok: false, reason: "no-active-project" as const };
+    }
+    if (getCurrent()) {
+      return { ok: false, reason: "session-running" as const };
+    }
+    if (typeof content !== "string") {
+      return { ok: false, reason: "content must be a string" };
+    }
+    try {
+      const { writeFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      await writeFile(join(activeRepoPath, "pipeline.md"), content, "utf8");
+      return { ok: true as const };
+    } catch (err) {
+      return {
+        ok: false as const,
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
   ipcMain.handle(IPC.ConfigRead, async () => {
     if (!activeRepoPath) return {};
     return readConfig(activeRepoPath);

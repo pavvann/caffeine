@@ -36,6 +36,8 @@ const AVAILABLE_AGENTS: { name: string; blurb: string }[] = [
   },
 ];
 
+type Mode = "read" | "edit" | "raw";
+
 export function Pipeline() {
   const live = useStore((s) => s.currentPipeline);
   const status = useStore((s) => s.status);
@@ -49,8 +51,10 @@ export function Pipeline() {
     null,
   );
   const [loaded, setLoaded] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [mode, setMode] = useState<Mode>("read");
   const [draft, setDraft] = useState<PipelineWireShape | null>(null);
+  const [rawDraft, setRawDraft] = useState<string>("");
+  const [rawDraftDirty, setRawDraftDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -71,21 +75,30 @@ export function Pipeline() {
   // Live overrides disk while a session is running.
   const pipeline = live ?? diskPipeline;
 
-  const startEdit = () => {
+  const enterEdit = () => {
     if (!pipeline) return;
-    // Deep-clone so reorder/add/remove don't mutate the source.
     setDraft({
       per_task: [...pipeline.per_task],
       on_backlog_complete: pipeline.on_backlog_complete.map((s) => ({ ...s })),
       decider: { ...pipeline.decider },
     });
-    setEditing(true);
+    setMode("edit");
     setSaveError(null);
   };
 
-  const discardEdit = () => {
+  const enterRaw = async () => {
+    setSaveError(null);
+    const raw = (await window.caffeine.pipeline.readRaw()) as string | null;
+    setRawDraft(raw ?? "");
+    setRawDraftDirty(false);
+    setMode("raw");
+  };
+
+  const enterRead = () => {
     setDraft(null);
-    setEditing(false);
+    setRawDraft("");
+    setRawDraftDirty(false);
+    setMode("read");
     setSaveError(null);
   };
 
@@ -102,8 +115,32 @@ export function Pipeline() {
         return;
       }
       setDiskPipeline(draft);
-      setDraft(null);
-      setEditing(false);
+      enterRead();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveRaw = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = (await window.caffeine.pipeline.writeRaw(rawDraft)) as
+        | { ok: true }
+        | { ok: false; reason: string };
+      if (!result?.ok) {
+        setSaveError(result?.reason ?? "unknown error");
+        return;
+      }
+      // Re-fetch the parsed view so the DCG reflects the new content.
+      // If the raw save introduced bad YAML, parsed read returns null
+      // and the Read tab will show EmptyState — that's the honest
+      // signal that the save broke the parser.
+      const reparsed = (await window.caffeine.pipeline.read()) as
+        | PipelineWireShape
+        | null;
+      setDiskPipeline(reparsed);
+      enterRead();
     } finally {
       setSaving(false);
     }
@@ -117,12 +154,36 @@ export function Pipeline() {
     );
   }
 
-  if (!pipeline) {
-    return <EmptyState />;
+  // EmptyState is only shown in Read/Edit modes — Raw mode lets the
+  // user create or fix a missing/broken pipeline.md from scratch.
+  if (!pipeline && mode !== "raw") {
+    return (
+      <div className="flex h-full flex-col">
+        <Header
+          pipeline={null}
+          iteration={0}
+          taskIndex={0}
+          taskTotal={0}
+          mode={mode}
+          sessionRunning={sessionRunning}
+          saving={saving}
+          dirty={false}
+          onMode={(m) => {
+            if (m === "raw") void enterRaw();
+            else if (m === "edit") enterEdit();
+            else enterRead();
+          }}
+          onSave={saveEdit}
+          onDiscard={enterRead}
+        />
+        <EmptyState />
+      </div>
+    );
   }
 
-  // Source of truth for what the graph renders.
-  const display = editing && draft ? draft : pipeline;
+  // Source of truth for what the DCG renders.
+  const display =
+    mode === "edit" && draft ? draft : (pipeline as PipelineWireShape | null);
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
@@ -131,33 +192,70 @@ export function Pipeline() {
         iteration={currentIteration}
         taskIndex={taskIndex}
         taskTotal={taskTotal}
-        editing={editing}
+        mode={mode}
         sessionRunning={sessionRunning}
         saving={saving}
-        onEdit={startEdit}
-        onSave={saveEdit}
-        onDiscard={discardEdit}
+        dirty={mode === "edit" ? draft !== null : rawDraftDirty}
+        onMode={(m) => {
+          if (m === "raw") void enterRaw();
+          else if (m === "edit") enterEdit();
+          else enterRead();
+        }}
+        onSave={mode === "raw" ? saveRaw : saveEdit}
+        onDiscard={enterRead}
       />
       {saveError && (
         <div className="border-b border-red-900/60 bg-red-950/30 px-4 py-2 text-xs text-red-300">
           Save failed: <span className="font-mono">{saveError}</span>
         </div>
       )}
-      {editing && draft && (
+      {mode === "edit" && draft && (
         <Palette currentStages={draft.per_task} />
       )}
-      <div className="flex-1 px-8 py-6">
-        <Graph
-          pipeline={display}
-          activeStage={editing ? null : currentStage}
-          iteration={editing ? 0 : currentIteration}
-          decision={editing ? null : lastDecision}
-          editing={editing}
-          onPerTaskChange={(stages) =>
-            setDraft((d) => (d ? { ...d, per_task: stages } : d))
-          }
+      {mode === "raw" ? (
+        <RawEditor
+          value={rawDraft}
+          onChange={(v) => {
+            setRawDraft(v);
+            setRawDraftDirty(true);
+          }}
         />
-      </div>
+      ) : (
+        display && (
+          <div className="flex-1 px-8 py-6">
+            <Graph
+              pipeline={display}
+              activeStage={mode === "edit" ? null : currentStage}
+              iteration={mode === "edit" ? 0 : currentIteration}
+              decision={mode === "edit" ? null : lastDecision}
+              editing={mode === "edit"}
+              onPerTaskChange={(stages) =>
+                setDraft((d) => (d ? { ...d, per_task: stages } : d))
+              }
+            />
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function RawEditor({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  return (
+    <div className="flex flex-1 flex-col">
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        placeholder="---&#10;per_task:&#10;  - reviewer&#10;on_backlog_complete:&#10;  - run: pnpm test&#10;decider:&#10;  max_iterations: 1&#10;---&#10;&#10;# Pipeline rationale here…"
+        className="flex-1 resize-none bg-zinc-950 p-6 font-mono text-sm leading-6 text-zinc-200 placeholder:text-zinc-700 focus:outline-none"
+      />
     </div>
   );
 }
@@ -185,33 +283,38 @@ function Header({
   iteration,
   taskIndex,
   taskTotal,
-  editing,
+  mode,
   sessionRunning,
   saving,
-  onEdit,
+  dirty,
+  onMode,
   onSave,
   onDiscard,
 }: {
-  pipeline: PipelineWireShape;
+  pipeline: PipelineWireShape | null;
   iteration: number;
   taskIndex: number;
   taskTotal: number;
-  editing: boolean;
+  mode: Mode;
   sessionRunning: boolean;
   saving: boolean;
-  onEdit: () => void;
+  dirty: boolean;
+  onMode: (mode: Mode) => void;
   onSave: () => void;
   onDiscard: () => void;
 }) {
-  const max = pipeline.decider.max_iterations;
-  const iterDisplay = iteration > 0 ? `${iteration} / ${max}` : `— / ${max}`;
+  const max = pipeline?.decider.max_iterations ?? 0;
+  const iterDisplay =
+    pipeline && iteration > 0 ? `${iteration} / ${max}` : null;
   const taskDisplay =
     taskIndex >= 1 && taskTotal >= 1 ? `${taskIndex} / ${taskTotal}` : null;
+
+  const editingMode = mode === "edit" || mode === "raw";
 
   return (
     <div className="flex h-9 shrink-0 items-center gap-4 border-b border-zinc-800 bg-zinc-900/40 px-4 text-xs text-zinc-400">
       <span className="font-mono text-zinc-300">pipeline.md</span>
-      {!editing && (
+      {!editingMode && iterDisplay && (
         <>
           <span>·</span>
           <span>
@@ -229,27 +332,25 @@ function Header({
           )}
         </>
       )}
-      {editing && (
-        <span className="font-mono text-amber-300">editing</span>
+      {mode === "edit" && (
+        <span className="font-mono text-amber-300">editing (visual)</span>
+      )}
+      {mode === "raw" && (
+        <span className="font-mono text-amber-300">
+          editing (raw){dirty ? " · unsaved" : ""}
+        </span>
       )}
       <div className="ml-auto flex items-center gap-2">
-        {!editing && (
-          <button
-            type="button"
-            onClick={onEdit}
-            disabled={sessionRunning}
-            title={
-              sessionRunning
-                ? "Stop the session to edit the pipeline"
-                : "Edit per_task stages"
-            }
-            className="rounded border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Edit
-          </button>
-        )}
-        {editing && (
+        <ModeToggle
+          mode={mode}
+          sessionRunning={sessionRunning}
+          hasPipeline={pipeline !== null}
+          saving={saving}
+          onMode={onMode}
+        />
+        {editingMode && (
           <>
+            <div className="ml-1 h-4 w-px bg-zinc-800" />
             <button
               type="button"
               onClick={onDiscard}
@@ -269,6 +370,77 @@ function Header({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function ModeToggle({
+  mode,
+  sessionRunning,
+  hasPipeline,
+  saving,
+  onMode,
+}: {
+  mode: Mode;
+  sessionRunning: boolean;
+  hasPipeline: boolean;
+  saving: boolean;
+  onMode: (mode: Mode) => void;
+}) {
+  // Edit mode requires a parsed pipeline (the drag-and-drop view
+  // operates on the structured shape). Raw mode works even with a
+  // missing or broken pipeline.md so it can be used to fix it.
+  // Sessions running disables both editing modes — pipeline can't be
+  // changed mid-flight without confusing the orchestrator.
+  const canEdit = !sessionRunning && hasPipeline && !saving;
+  const canRaw = !sessionRunning && !saving;
+
+  const buttons: Array<{
+    id: Mode;
+    label: string;
+    disabled: boolean;
+    title?: string;
+  }> = [
+    { id: "read", label: "Read", disabled: saving },
+    {
+      id: "edit",
+      label: "Edit",
+      disabled: !canEdit,
+      title: sessionRunning
+        ? "Stop the session to edit"
+        : !hasPipeline
+          ? "No pipeline.md to edit — use Raw to create one"
+          : undefined,
+    },
+    {
+      id: "raw",
+      label: "Raw",
+      disabled: !canRaw,
+      title: sessionRunning ? "Stop the session to edit" : undefined,
+    },
+  ];
+
+  return (
+    <div className="flex items-center rounded border border-zinc-800 bg-zinc-950 p-0.5">
+      {buttons.map((btn) => {
+        const active = mode === btn.id;
+        return (
+          <button
+            key={btn.id}
+            type="button"
+            onClick={() => onMode(btn.id)}
+            disabled={btn.disabled}
+            title={btn.title}
+            className={`rounded px-2 py-0.5 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+              active
+                ? "bg-zinc-800 text-zinc-100"
+                : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {btn.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

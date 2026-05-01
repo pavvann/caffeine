@@ -17,6 +17,9 @@ const api = {
     read: () => ipcRenderer.invoke(IPC.PipelineRead),
     write: (pipeline: unknown) =>
       ipcRenderer.invoke(IPC.PipelineWrite, pipeline),
+    readRaw: () => ipcRenderer.invoke(IPC.PipelineReadRaw),
+    writeRaw: (content: string) =>
+      ipcRenderer.invoke(IPC.PipelineWriteRaw, content),
   },
   config: {
     read: () => ipcRenderer.invoke(IPC.ConfigRead),
