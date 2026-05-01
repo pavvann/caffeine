@@ -5,7 +5,8 @@ import { clearCurrent, getCurrent, setCurrent } from "./agent/state";
 import { readBacklog, writeBacklog } from "./repo/backlog";
 import { readState, watchState } from "./repo/state";
 import { readConfig, writeConfig } from "./repo/config";
-import { readPipeline } from "./pipeline/parser";
+import { readPipeline, writePipeline } from "./pipeline/parser";
+import type { Pipeline } from "./pipeline/types";
 import {
   getLastSessionId,
   listProjects,
@@ -81,6 +82,23 @@ export function registerIpc(windowGetter: WindowGetter): void {
     // shows "no pipeline" instead of crashing. Sessions still surface
     // the error properly via runner.ts.
     return readPipeline(activeRepoPath).catch(() => null);
+  });
+  ipcMain.handle(IPC.PipelineWrite, async (_e, pipeline: Pipeline) => {
+    if (!activeRepoPath) {
+      return { ok: false, reason: "no-active-project" as const };
+    }
+    if (getCurrent()) {
+      return { ok: false, reason: "session-running" as const };
+    }
+    try {
+      await writePipeline(activeRepoPath, pipeline);
+      return { ok: true as const };
+    } catch (err) {
+      return {
+        ok: false as const,
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
   });
   ipcMain.handle(IPC.ConfigRead, async () => {
     if (!activeRepoPath) return {};
