@@ -17,7 +17,7 @@
 // strip at the top. Save writes back to pipeline.md preserving the
 // markdown body. Edit is disabled while a session is running.
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import type { PipelineWireShape } from "@shared/types";
 
@@ -427,6 +427,17 @@ function PerTaskLaneReadOnly({
 
 const STAGE_DRAG_TYPE = "application/x-caffeine-stage";
 
+/**
+ * Editable per_task lane. The whole lane is the drop target — a tiny
+ * gap-only target was unreliable in practice (8px is too small to hit
+ * consistently and the browser animates the chip back to source on a
+ * missed drop, which looked like the reorder didn't stick).
+ *
+ * On dragover we walk the rendered stage chips, compare cursor X to
+ * each chip's horizontal midpoint, and derive an insertion index. A
+ * vertical green bar renders at that index so the user sees exactly
+ * where the chip will land.
+ */
 function PerTaskLaneEditable({
   stages,
   onChange,
@@ -435,7 +446,8 @@ function PerTaskLaneEditable({
   onChange: (next: string[]) => void;
 }) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [hoverGap, setHoverGap] = useState<number | null>(null);
+  const [insertAt, setInsertAt] = useState<number | null>(null);
+  const laneRef = useRef<HTMLDivElement | null>(null);
 
   const onStageDragStart = (i: number) => (e: React.DragEvent) => {
     e.dataTransfer.effectAllowed = "move";
@@ -446,63 +458,78 @@ function PerTaskLaneEditable({
     setDragIndex(i);
   };
 
-  const onDrop = (atIndex: number) => (e: React.DragEvent) => {
+  const computeInsertIndex = (clientX: number): number => {
+    if (!laneRef.current) return stages.length;
+    const chips = laneRef.current.querySelectorAll<HTMLElement>(
+      "[data-caffeine-stage]",
+    );
+    for (let i = 0; i < chips.length; i++) {
+      const rect = chips[i].getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (clientX < mid) return i;
+    }
+    return chips.length;
+  };
+
+  const onLaneDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes(STAGE_DRAG_TYPE)) return;
     e.preventDefault();
-    setHoverGap(null);
-    setDragIndex(null);
+    e.dataTransfer.dropEffect = "move";
+    setInsertAt(computeInsertIndex(e.clientX));
+  };
+
+  const onLaneDrop = (e: React.DragEvent) => {
+    e.preventDefault();
     const raw = e.dataTransfer.getData(STAGE_DRAG_TYPE);
+    const at = insertAt ?? stages.length;
+    setInsertAt(null);
+    setDragIndex(null);
     if (!raw) return;
-    let payload: { kind: "stage"; from: number } | { kind: "palette"; name: string };
+    let payload:
+      | { kind: "stage"; from: number }
+      | { kind: "palette"; name: string };
     try {
       payload = JSON.parse(raw);
     } catch {
       return;
     }
     if (payload.kind === "stage") {
+      if (payload.from === at || payload.from + 1 === at) return; // no-op
       const next = [...stages];
       const [moved] = next.splice(payload.from, 1);
-      const insertAt = atIndex > payload.from ? atIndex - 1 : atIndex;
-      next.splice(insertAt, 0, moved);
+      const adjusted = at > payload.from ? at - 1 : at;
+      next.splice(adjusted, 0, moved);
       onChange(next);
     } else if (payload.kind === "palette") {
-      // Don't add duplicates — silently no-op if the agent is already in the lane.
       if (stages.includes(payload.name)) return;
       const next = [...stages];
-      next.splice(atIndex, 0, payload.name);
+      next.splice(at, 0, payload.name);
       onChange(next);
     }
   };
 
   const onRemove = (i: number) => () => {
-    if (stages.length <= 1) return; // never let the lane go empty via a click
+    if (stages.length <= 1) return;
     const next = [...stages];
     next.splice(i, 1);
     onChange(next);
   };
 
-  const allowDrop = (gap: number) => (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes(STAGE_DRAG_TYPE)) {
-      e.preventDefault();
-      setHoverGap(gap);
-    }
-  };
-
   return (
     <div
-      className="flex flex-wrap items-center gap-1"
+      ref={laneRef}
+      onDragOver={onLaneDragOver}
+      onDrop={onLaneDrop}
       onDragLeave={(e) => {
-        // only clear when leaving the lane container, not when crossing
-        // between children
-        if (e.currentTarget === e.target) setHoverGap(null);
+        // Only clear when leaving the lane container itself; React
+        // dragleave fires when crossing between children too.
+        if (e.currentTarget === e.target) setInsertAt(null);
       }}
+      className="flex min-h-[2.75rem] flex-wrap items-center gap-1 rounded p-1"
     >
       {stages.map((stageName, i) => (
         <Fragment key={stageName + ":" + i}>
-          <DropGap
-            active={hoverGap === i}
-            onDragOver={allowDrop(i)}
-            onDrop={onDrop(i)}
-          />
+          {insertAt === i && <DropIndicator />}
           <DraggableStage
             name={stageName}
             removable={stages.length > 1}
@@ -510,17 +537,13 @@ function PerTaskLaneEditable({
             onDragStart={onStageDragStart(i)}
             onDragEnd={() => {
               setDragIndex(null);
-              setHoverGap(null);
+              setInsertAt(null);
             }}
             onRemove={onRemove(i)}
           />
         </Fragment>
       ))}
-      <DropGap
-        active={hoverGap === stages.length}
-        onDragOver={allowDrop(stages.length)}
-        onDrop={onDrop(stages.length)}
-      />
+      {insertAt === stages.length && <DropIndicator />}
     </div>
   );
 }
@@ -543,6 +566,7 @@ function DraggableStage({
   return (
     <div
       draggable
+      data-caffeine-stage="true"
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       className={`group flex cursor-grab items-center gap-1.5 rounded border px-2 py-1 text-xs transition ${
@@ -551,7 +575,7 @@ function DraggableStage({
           : "border-zinc-700 bg-zinc-900 text-zinc-200 hover:border-zinc-600"
       }`}
     >
-      <span className="text-zinc-600 select-none">⋮⋮</span>
+      <span className="select-none text-zinc-600">⋮⋮</span>
       <span>{name}</span>
       {removable && (
         <button
@@ -567,22 +591,11 @@ function DraggableStage({
   );
 }
 
-function DropGap({
-  active,
-  onDragOver,
-  onDrop,
-}: {
-  active: boolean;
-  onDragOver: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
-}) {
+function DropIndicator() {
   return (
     <div
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      className={`h-7 w-2 rounded-sm transition ${
-        active ? "bg-emerald-500/70" : "bg-transparent"
-      }`}
+      aria-hidden
+      className="h-7 w-0.5 rounded-sm bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]"
     />
   );
 }
