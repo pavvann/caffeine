@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   AssistantTextEvent,
   CostEvent,
+  PipelineWireShape,
   Project,
   SessionEvent,
   SessionStatus,
@@ -43,6 +44,22 @@ type Store = {
   cost: Cost;
   stateFile: string;
 
+  // Pipeline mode state. `currentPipeline` is null outside pipeline
+  // mode. The other fields are valid only while `currentPipeline` is
+  // non-null; the StatusBar reads them defensively.
+  currentPipeline: PipelineWireShape | null;
+  currentTaskIndex: number;
+  currentTaskTotal: number;
+  currentStage: string | null;
+  currentIteration: number;
+  /**
+   * Last decision the orchestrator emitted (`done`/`loop`/`halt`).
+   * `null` until any iteration has decided. The StatusBar uses this
+   * to surface a halt — without it, halt is indistinguishable from
+   * a clean done from the user's perspective.
+   */
+  lastDecision: "done" | "loop" | "halt" | null;
+
   // view routing — single-session app, so a tiny enum is enough for now
   view: "session" | "backlog" | "state" | "settings";
   setView: (v: Store["view"]) => void;
@@ -68,6 +85,12 @@ export const useStore = create<Store>((set) => ({
   rows: [],
   cost: emptyCost,
   stateFile: "",
+  currentPipeline: null,
+  currentTaskIndex: -1,
+  currentTaskTotal: 0,
+  currentStage: null,
+  currentIteration: 0,
+  lastDecision: null,
   view: "session",
 
   setView: (v) => set({ view: v }),
@@ -76,6 +99,21 @@ export const useStore = create<Store>((set) => ({
     set((s) => {
       switch (event.kind) {
         case "status":
+          // A transition into `running` marks a session boundary.
+          // Clear pipeline state so a fresh session doesn't inherit
+          // stale fields from the previous run.
+          if (event.status === "running") {
+            return {
+              status: event.status,
+              statusReason: event.reason ?? null,
+              currentPipeline: null,
+              currentTaskIndex: -1,
+              currentTaskTotal: 0,
+              currentStage: null,
+              currentIteration: 0,
+              lastDecision: null,
+            };
+          }
           return {
             status: event.status,
             statusReason: event.reason ?? null,
@@ -104,6 +142,22 @@ export const useStore = create<Store>((set) => ({
         case "tool-result": {
           return { rows: applyToolResult(s.rows, event) };
         }
+        case "pipeline-started":
+          return { currentPipeline: event.pipeline };
+        case "iteration-started":
+          return { currentIteration: event.iteration };
+        case "iteration-decided":
+          return { lastDecision: event.decision };
+        case "stage-started":
+          return {
+            currentTaskIndex: event.taskIndex,
+            currentTaskTotal: event.taskTotal,
+            currentStage: event.stageName,
+          };
+        case "stage-completed":
+          // Leave currentStage in place — it's the last *displayed*
+          // stage. The next `stage-started` will overwrite it.
+          return {};
       }
     }),
 
@@ -114,6 +168,12 @@ export const useStore = create<Store>((set) => ({
       rows: [],
       cost: emptyCost,
       stateFile: "",
+      currentPipeline: null,
+      currentTaskIndex: -1,
+      currentTaskTotal: 0,
+      currentStage: null,
+      currentIteration: 0,
+      lastDecision: null,
     }),
 }));
 

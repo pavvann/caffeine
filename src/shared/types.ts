@@ -46,13 +46,68 @@ export type StateFileEvent = {
   content: string;
 };
 
+// Pipeline-mode events. Wire-only; the renderer turns these into the
+// status-bar string `Task <i>/<n> · <stage> · iteration <k>`.
+//
+// `Pipeline` is imported lazily from the main-process pipeline types
+// to avoid a renderer dependency on parser/orchestrator code. The
+// shape is duplicated here as `PipelineWireShape` so the renderer can
+// type-check without importing main-process modules.
+
+export type PipelineWireShape = {
+  per_task: string[];
+  on_backlog_complete: { run: string }[];
+  decider: {
+    max_iterations: number;
+    cost_ceiling_per_iteration_usd?: number;
+  };
+};
+
+export type PipelineStartedEvent = {
+  kind: "pipeline-started";
+  pipeline: PipelineWireShape;
+};
+
+export type StageStartedEvent = {
+  kind: "stage-started";
+  /** 1-indexed position among the iteration's unchecked tasks. */
+  taskIndex: number;
+  /** Total unchecked tasks at the start of this iteration. */
+  taskTotal: number;
+  stageName: string;
+};
+
+export type StageCompletedEvent = {
+  kind: "stage-completed";
+  taskIndex: number;
+  taskTotal: number;
+  stageName: string;
+  durationMs: number;
+};
+
+export type IterationStartedEvent = {
+  kind: "iteration-started";
+  iteration: number;
+};
+
+export type IterationDecidedEvent = {
+  kind: "iteration-decided";
+  iteration: number;
+  decision: "done" | "loop" | "halt";
+};
+
 export type SessionEvent =
   | ToolCallEvent
   | ToolResultEvent
   | AssistantTextEvent
   | StatusEvent
   | CostEvent
-  | StateFileEvent;
+  | StateFileEvent
+  | PipelineStartedEvent
+  | StageStartedEvent
+  | StageCompletedEvent
+  | IterationStartedEvent
+  | IterationDecidedEvent;
 
 export type Project = {
   id: string;
