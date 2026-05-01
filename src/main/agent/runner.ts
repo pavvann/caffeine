@@ -1,10 +1,15 @@
 import { query, type Options, type Query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { CAFFEINE_SYSTEM_PROMPT, composeUserPrompt } from "./prompts";
 import { REVIEWER_AGENT } from "./reviewer";
+import { SECURITY_AGENT } from "./security-agent";
+import { TESTER_AGENT } from "./tester-agent";
+import { DECIDER_AGENT } from "./decider-agent";
 import { buildHooks } from "./hooks";
 import { PromptBus } from "./promptBus";
 import { emitSessionEvent } from "../ipc";
 import { readConfig, verificationPromptSection } from "../repo/config";
+import { readPipeline } from "../pipeline/parser";
+import { runPipeline } from "../pipeline/orchestrator";
 import type {
   AssistantTextEvent,
   CostEvent,
@@ -44,9 +49,34 @@ export function startSession(args: SessionStartArgs): RunningSession {
       const options = await optionsPromise;
       const q = query({ prompt: bus.iter(), options });
       queryHandle.current = q;
-      for await (const message of q) {
-        handleMessage(message, args.onSessionId);
-      }
+
+      // Pipeline mode: if pipeline.md is present, kick the orchestrator
+      // off concurrently with the SDK loop. The orchestrator pushes
+      // stage prompts onto the same bus and observes BACKLOG.md /
+      // STATE.md mutations the agent makes. A `PipelineParseError`
+      // from `readPipeline` is intentionally NOT caught here — it
+      // propagates to the outer catch as a session-level error so
+      // the user is told their pipeline.md is malformed instead of
+      // silently falling back to v1 mode.
+      const pipeline = await readPipeline(args.targetRepoPath);
+      const orchestratorPromise: Promise<void> = pipeline
+        ? runPipeline(pipeline, args.targetRepoPath, bus, q, {
+            signal: abort.signal,
+          }).catch((err) => {
+            // Tear the SDK loop down so `Promise.all` can settle even
+            // if the SDK is mid-tool-execution.
+            q.interrupt().catch(() => {});
+            throw err;
+          })
+        : Promise.resolve();
+
+      const sdkPromise = (async () => {
+        for await (const message of q) {
+          handleMessage(message, args.onSessionId);
+        }
+      })();
+
+      await Promise.all([sdkPromise, orchestratorPromise]);
       emit({ kind: "status", status: "idle", at: Date.now() });
     } catch (err) {
       const reason =
@@ -83,7 +113,12 @@ async function buildOptions(
     cwd: args.targetRepoPath,
     systemPrompt,
     allowedTools: ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "Agent"],
-    agents: { reviewer: REVIEWER_AGENT },
+    agents: {
+      reviewer: REVIEWER_AGENT,
+      security: SECURITY_AGENT,
+      tester: TESTER_AGENT,
+      decider: DECIDER_AGENT,
+    },
     hooks: buildHooks(args.targetRepoPath),
     resume: args.resumeSessionId,
     model: args.model ?? "claude-opus-4-7",
@@ -96,7 +131,7 @@ async function buildOptions(
     // `claude` and Caffeine inherits that login.
     env: {
       ...process.env,
-      CLAUDE_AGENT_SDK_CLIENT_APP: "caffeine/0.0.1",
+      CLAUDE_AGENT_SDK_CLIENT_APP: "caffeine/0.0.3",
     },
   };
 }

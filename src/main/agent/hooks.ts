@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import { BrowserWindow, dialog } from "electron";
 import type {
@@ -106,8 +106,8 @@ export function buildHooks(targetRepoPath: string): Partial<
       {
         hooks: [
           async (): Promise<HookJSONOutput> => {
-            // The long-run trick: if BACKLOG.md still has unchecked items,
-            // refuse the stop so the agent has to keep going.
+            // The long-run trick: if BACKLOG.md still has unchecked
+            // items, refuse the stop so the agent has to keep going.
             const open = await countOpenBacklogItems(targetRepoPath);
             if (open > 0) {
               return {
@@ -115,12 +115,43 @@ export function buildHooks(targetRepoPath: string): Partial<
                 reason: `BACKLOG.md still has ${open} unchecked task(s). Continue with the protocol — pick the next task.`,
               };
             }
+
+            // Pipeline-mode extension: if `pipeline.md` is present and
+            // the orchestrator has NOT yet dropped its completion
+            // marker, hold the agent open so the orchestrator can run
+            // `on_backlog_complete` and (optionally) loop with new
+            // [LOOP-N] tasks. Outside pipeline mode, this branch is
+            // skipped and v1 behavior is preserved exactly.
+            if (await fileExists(join(targetRepoPath, "pipeline.md"))) {
+              if (!(await fileExists(join(targetRepoPath, PIPELINE_DONE_MARKER)))) {
+                return {
+                  decision: "block",
+                  reason: "Backlog complete, run on_backlog_complete stages",
+                };
+              }
+            }
             return {};
           },
         ],
       },
     ],
   };
+}
+
+/**
+ * Path the orchestrator drops on disk (relative to the target repo)
+ * once `runPipeline` returns. The Stop hook treats this file as the
+ * "pipeline mode is truly done — let the agent stop" sentinel.
+ */
+export const PIPELINE_DONE_MARKER = ".caffeine-pipeline-complete";
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function confirmDestructive(command: string): Promise<boolean> {
