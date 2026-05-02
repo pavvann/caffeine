@@ -102,6 +102,36 @@ export function buildHooks(targetRepoPath: string): Partial<
         ],
       },
     ],
+    SubagentStart: [
+      {
+        hooks: [
+          async (input): Promise<HookJSONOutput> => {
+            if (input.hook_event_name !== "SubagentStart") return {};
+            // Tracks the actually-running subagent for the Pipeline
+            // view's per_task lane highlight. The orchestrator's
+            // stage-started events fire at queue-time (all stages
+            // for a task get queued in a tight loop), so they can't
+            // be used for live highlighting.
+            emitSessionEvent({
+              kind: "subagent-state",
+              running: input.agent_type,
+            });
+            return {};
+          },
+        ],
+      },
+    ],
+    SubagentStop: [
+      {
+        hooks: [
+          async (input): Promise<HookJSONOutput> => {
+            if (input.hook_event_name !== "SubagentStop") return {};
+            emitSessionEvent({ kind: "subagent-state", running: null });
+            return {};
+          },
+        ],
+      },
+    ],
     Stop: [
       {
         hooks: [

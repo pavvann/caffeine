@@ -96,6 +96,24 @@ export type IterationDecidedEvent = {
   decision: "done" | "loop" | "halt";
 };
 
+/**
+ * Wire event for the *actually-running* subagent. Driven by the SDK's
+ * SubagentStart/SubagentStop hooks (see src/main/agent/hooks.ts).
+ *
+ * `running` carries the subagent's `agent_type` (e.g. "reviewer",
+ * "security", "tester", "decider") while a subagent is mid-execution,
+ * and `null` between stages or when no subagent is active.
+ *
+ * Distinct from `StageStartedEvent`, which fires when the orchestrator
+ * *queues* a stage prompt onto the bus — those events come in rapid
+ * bursts (one per stage per task at queue-time) and don't reflect
+ * actual execution timing.
+ */
+export type SubagentStateEvent = {
+  kind: "subagent-state";
+  running: string | null;
+};
+
 export type SessionEvent =
   | ToolCallEvent
   | ToolResultEvent
@@ -107,7 +125,8 @@ export type SessionEvent =
   | StageStartedEvent
   | StageCompletedEvent
   | IterationStartedEvent
-  | IterationDecidedEvent;
+  | IterationDecidedEvent
+  | SubagentStateEvent;
 
 export type Project = {
   id: string;

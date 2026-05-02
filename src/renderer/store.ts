@@ -149,15 +149,21 @@ export const useStore = create<Store>((set) => ({
         case "iteration-decided":
           return { lastDecision: event.decision };
         case "stage-started":
+          // Only update task counters here. `stageName` carried on
+          // this event is the last *queued* stage, not the running
+          // one — the orchestrator pushes all per_task prompts onto
+          // the bus in a tight loop, so this event fires N times in
+          // rapid succession at the start of each task. The actual
+          // running-stage highlight is driven by `subagent-state`
+          // events from the SDK's SubagentStart/SubagentStop hooks.
           return {
             currentTaskIndex: event.taskIndex,
             currentTaskTotal: event.taskTotal,
-            currentStage: event.stageName,
           };
         case "stage-completed":
-          // Leave currentStage in place — it's the last *displayed*
-          // stage. The next `stage-started` will overwrite it.
           return {};
+        case "subagent-state":
+          return { currentStage: event.running };
       }
     }),
 
