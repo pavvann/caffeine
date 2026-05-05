@@ -16,7 +16,8 @@ pipeline.md
 
 # Generated icon artifacts — derived from build/icon.png by
 # scripts/generate-icns.cjs. The .png is the source of truth and is
-# tracked; the .iconset/ and .icns are regenerable on any macOS
-# install via `pnpm generate-icns` (also runs on postinstall).
+# tracked; everything below regenerates on any macOS install via
+# `pnpm generate-icns` (also runs on postinstall).
 build/icon.iconset/
 build/icon.icns
+build/icon-mac.png
