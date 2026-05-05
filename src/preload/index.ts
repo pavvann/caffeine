@@ -35,6 +35,8 @@ const api = {
     pause: () => ipcRenderer.invoke(IPC.SessionPause),
     stop: () => ipcRenderer.invoke(IPC.SessionStop),
     intervene: (text: string) => ipcRenderer.invoke(IPC.SessionIntervene, text),
+    history: (sessionId?: string) =>
+      ipcRenderer.invoke(IPC.SessionHistory, sessionId ?? null),
     onEvent: (cb: (e: SessionEvent) => void): (() => void) => {
       const listener = (_: IpcRendererEvent, event: SessionEvent) => cb(event);
       ipcRenderer.on(IPC.SessionEvent, listener);

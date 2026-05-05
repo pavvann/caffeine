@@ -7,16 +7,35 @@ import { Pipeline } from "./views/Pipeline";
 import { StateFile } from "./views/StateFile";
 import { ProjectPicker } from "./views/ProjectPicker";
 import { Settings } from "./views/Settings";
+import type { SessionEvent } from "@shared/types";
 
 export function App() {
   const view = useStore((s) => s.view);
   const project = useStore((s) => s.project);
   const setProject = useStore((s) => s.setProject);
   const ingest = useStore((s) => s.ingest);
+  const hydrateHistory = useStore((s) => s.hydrateHistory);
 
   useEffect(() => {
     return window.caffeine.session.onEvent(ingest);
   }, [ingest]);
+
+  // Hydrate the transcript from disk whenever a project becomes
+  // active. The IPC handler returns events for the project's most
+  // recent session, ordered by insertion. hydrateHistory() filters
+  // status/subagent-state events and resets transcript-derived
+  // fields before replaying so switching projects doesn't accumulate.
+  useEffect(() => {
+    if (!project) return;
+    let cancelled = false;
+    void window.caffeine.session.history().then((events) => {
+      if (cancelled) return;
+      hydrateHistory((events as SessionEvent[]) ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.id, hydrateHistory]);
 
   return (
     <div className="flex h-screen flex-col">

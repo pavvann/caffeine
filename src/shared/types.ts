@@ -162,6 +162,7 @@ export const IPC = {
   ConfigRead: "config:read",
   ConfigWrite: "config:write",
   SessionStart: "session:start",
+  SessionHistory: "session:history",
   SessionPause: "session:pause",
   SessionStop: "session:stop",
   SessionIntervene: "session:intervene",

@@ -65,6 +65,18 @@ type Store = {
   setView: (v: Store["view"]) => void;
 
   ingest: (event: SessionEvent) => void;
+  /**
+   * Replay a batch of historical events into the store (for restoring
+   * the transcript when the user reopens a project). Filters status
+   * and subagent-state events because those describe lifecycle that
+   * isn't current — the live status bar reflects "no session running"
+   * after a restart, not the historical session's last status.
+   *
+   * Resets transcript-derived fields (rows, cost, stateFile, pipeline
+   * state) before replaying so reopening a project doesn't accumulate
+   * across runs.
+   */
+  hydrateHistory: (events: SessionEvent[]) => void;
   reset: () => void;
 };
 
@@ -76,7 +88,7 @@ const emptyCost: Cost = {
   costUsd: 0,
 };
 
-export const useStore = create<Store>((set) => ({
+export const useStore = create<Store>((set, get) => ({
   project: null,
   setProject: (project) => set({ project }),
 
@@ -166,6 +178,31 @@ export const useStore = create<Store>((set) => ({
           return { currentStage: event.running };
       }
     }),
+
+  hydrateHistory: (events) => {
+    // Reset only transcript-derived fields; preserve project, status,
+    // view selection, etc. (the user is opening a project, not
+    // changing identity or navigation).
+    set({
+      rows: [],
+      cost: emptyCost,
+      stateFile: "",
+      currentPipeline: null,
+      currentTaskIndex: -1,
+      currentTaskTotal: 0,
+      currentStage: null,
+      currentIteration: 0,
+      lastDecision: null,
+    });
+    const ingest = get().ingest;
+    for (const event of events) {
+      // Skip lifecycle/transient events — they describe a session
+      // that already ended, not the current state.
+      if (event.kind === "status") continue;
+      if (event.kind === "subagent-state") continue;
+      ingest(event);
+    }
+  },
 
   reset: () =>
     set({

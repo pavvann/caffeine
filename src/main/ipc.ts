@@ -8,8 +8,11 @@ import { readConfig, writeConfig } from "./repo/config";
 import { readPipeline, writePipeline } from "./pipeline/parser";
 import type { Pipeline } from "./pipeline/types";
 import {
+  appendTranscriptEvent,
   getLastSessionId,
   listProjects,
+  loadLatestSessionEvents,
+  loadTranscriptEvents,
   recordSession,
   upsertProject,
 } from "./db/queries";
@@ -26,6 +29,14 @@ let activeRepoPath: string | null = null;
 export function setActiveRepoPath(path: string | null): void {
   activeRepoPath = path;
 }
+
+// Tracks the current session id so emitSessionEvent can persist every
+// event to transcript_events. Set when the SDK emits the init message
+// (via onSessionId in SessionStart), cleared on session stop. While
+// null, events still flow to the renderer but are not persisted —
+// that window is bounded to before the first SDK turn so the loss is
+// at most a couple of status events.
+let currentSessionId: string | null = null;
 
 type WindowGetter = () => BrowserWindow | null;
 
@@ -163,6 +174,9 @@ export function registerIpc(windowGetter: WindowGetter): void {
       onSessionId: (id) => {
         sessionId = id;
         recordSession(args.targetRepoPath, id);
+        // Order matters: recordSession FIRST so the FK constraint on
+        // transcript_events is satisfied before the next event fires.
+        currentSessionId = id;
       },
     });
     setActiveRepoPath(args.targetRepoPath);
@@ -170,7 +184,10 @@ export function registerIpc(windowGetter: WindowGetter): void {
     setCurrent({ project: args.targetRepoPath, session });
 
     // Clean up the singleton when the loop exits — naturally or via abort.
-    session.done.catch(() => {}).finally(() => clearCurrent());
+    session.done.catch(() => {}).finally(() => {
+      clearCurrent();
+      currentSessionId = null;
+    });
 
     return { ok: true as const, get sessionId() { return sessionId; } };
   });
@@ -192,8 +209,22 @@ export function registerIpc(windowGetter: WindowGetter): void {
     cur.session.abort.abort();
     await cur.session.query.interrupt().catch(() => {});
     clearCurrent();
+    currentSessionId = null;
     return true;
   });
+
+  ipcMain.handle(
+    IPC.SessionHistory,
+    async (_e, sessionId?: string | null) => {
+      // Two modes: explicit session id (for browsing past sessions) or
+      // omit to get the active project's most recent session.
+      if (typeof sessionId === "string" && sessionId.length > 0) {
+        return loadTranscriptEvents(sessionId);
+      }
+      if (!activeRepoPath) return [];
+      return loadLatestSessionEvents(activeRepoPath);
+    },
+  );
 
   ipcMain.handle(IPC.SessionIntervene, async (_e, text: string) => {
     const cur = getCurrent();
@@ -212,6 +243,12 @@ export function registerIpc(windowGetter: WindowGetter): void {
 }
 
 export function emitSessionEvent(event: SessionEvent): void {
+  // Persist before forwarding so a renderer crash mid-stream still
+  // leaves the transcript on disk. Persistence is best-effort: failures
+  // are logged inside appendTranscriptEvent and never throw out.
+  if (currentSessionId) {
+    appendTranscriptEvent(currentSessionId, event);
+  }
   const win = getWindow();
   if (!win || win.isDestroyed()) return;
   win.webContents.send(IPC.SessionEvent, event);

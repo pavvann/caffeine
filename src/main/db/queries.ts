@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import { getDb } from "./schema";
-import type { Project } from "@shared/types";
+import type { Project, SessionEvent } from "@shared/types";
 
 type Row = {
   id: string;
@@ -81,4 +81,67 @@ export function getLastSessionId(projectPath: string): string | null {
     .prepare(`SELECT last_session_id FROM projects WHERE path = ?`)
     .get(projectPath) as { last_session_id: string | null } | undefined;
   return row?.last_session_id ?? null;
+}
+
+/**
+ * Append a SessionEvent to the transcript log for `sessionId`.
+ *
+ * Called from `emitSessionEvent` for every event that flows to the
+ * renderer once a session_id is known. Failures are non-fatal — we
+ * log and continue rather than crash the session because of a write
+ * error.
+ */
+export function appendTranscriptEvent(
+  sessionId: string,
+  event: SessionEvent,
+): void {
+  try {
+    getDb()
+      .prepare(
+        `INSERT INTO transcript_events (session_id, recorded_at, event_json)
+         VALUES (?, ?, ?)`,
+      )
+      .run(sessionId, Date.now(), JSON.stringify(event));
+  } catch (err) {
+    // FK failures here mean we got an event before recordSession()
+    // had inserted the row for this session_id. Tolerate it — the
+    // window of events we'd lose is < 100ms and they're typically
+    // low-value status events, not tool calls.
+    console.error("[caffeine] appendTranscriptEvent failed:", err);
+  }
+}
+
+/**
+ * Load every persisted event for a session, ordered by insertion.
+ * Returned events are the shape that the renderer's `ingest()`
+ * already handles. Caller is responsible for filtering events that
+ * shouldn't be replayed during hydration (e.g. status, subagent-state).
+ */
+export function loadTranscriptEvents(sessionId: string): SessionEvent[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT event_json FROM transcript_events
+       WHERE session_id = ?
+       ORDER BY id ASC`,
+    )
+    .all(sessionId) as { event_json: string }[];
+  const out: SessionEvent[] = [];
+  for (const row of rows) {
+    try {
+      out.push(JSON.parse(row.event_json) as SessionEvent);
+    } catch {
+      // Skip malformed entries rather than failing the whole load.
+    }
+  }
+  return out;
+}
+
+/**
+ * Convenience: load the latest session's events for a project.
+ * Returns an empty array if the project has never had a session.
+ */
+export function loadLatestSessionEvents(projectPath: string): SessionEvent[] {
+  const sid = getLastSessionId(projectPath);
+  if (!sid) return [];
+  return loadTranscriptEvents(sid);
 }

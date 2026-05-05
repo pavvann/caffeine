@@ -98,3 +98,127 @@ describe("store.ingest — pipeline event semantics", () => {
     expect(useStore.getState().currentStage).toBeNull();
   });
 });
+
+describe("store.hydrateHistory — transcript replay from persisted events", () => {
+  it("replays assistant-text and tool events into rows", () => {
+    useStore.getState().hydrateHistory([
+      {
+        kind: "tool-call",
+        id: "t1",
+        name: "Read",
+        input: { file_path: "/x" },
+        startedAt: 1000,
+      },
+      {
+        kind: "tool-result",
+        id: "t1",
+        output: "ok",
+        isError: false,
+        finishedAt: 1100,
+      },
+      { kind: "assistant-text", id: "a1", text: "hello", at: 1200 },
+    ]);
+    const rows = useStore.getState().rows;
+    expect(rows).toHaveLength(2);
+    // tool-call + tool-result get merged into a single tool row
+    expect(rows[0]).toMatchObject({ kind: "tool", id: "t1", status: "done" });
+    expect(rows[1]).toMatchObject({ kind: "text", text: "hello" });
+  });
+
+  it("skips status events during hydration (lifecycle is not historical state)", () => {
+    useStore.getState().hydrateHistory([
+      { kind: "status", status: "running", at: 1000 },
+      { kind: "status", status: "error", reason: "old failure", at: 2000 },
+    ]);
+    // Status should NOT be set from replay — the live session (or
+    // absence of one) decides current status, not history.
+    expect(useStore.getState().status).toBe("idle");
+    expect(useStore.getState().statusReason).toBeNull();
+  });
+
+  it("skips subagent-state events during hydration (live-only highlight)", () => {
+    useStore.getState().hydrateHistory([
+      { kind: "subagent-state", running: "reviewer" },
+      { kind: "subagent-state", running: "security" },
+    ]);
+    // currentStage describes a *running* subagent; history shouldn't
+    // pin it to whatever was running last time.
+    expect(useStore.getState().currentStage).toBeNull();
+  });
+
+  it("resets rows/cost/state-file before replaying so reopening a project doesn't accumulate", () => {
+    // Pollute the store as if we had a session running
+    useStore.getState().ingest({
+      kind: "tool-call",
+      id: "stale",
+      name: "Read",
+      input: {},
+      startedAt: 1,
+    });
+    useStore.getState().ingest({
+      kind: "cost",
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      costUsd: 1.5,
+    });
+    expect(useStore.getState().rows).toHaveLength(1);
+    expect(useStore.getState().cost.costUsd).toBeCloseTo(1.5);
+
+    // Hydrate with a different (smaller) history
+    useStore.getState().hydrateHistory([
+      { kind: "assistant-text", id: "a1", text: "fresh", at: 100 },
+    ]);
+
+    // Stale tool row is gone; cost is reset before replaying
+    expect(useStore.getState().rows).toHaveLength(1);
+    expect(useStore.getState().rows[0]).toMatchObject({ text: "fresh" });
+    expect(useStore.getState().cost.costUsd).toBeCloseTo(0);
+  });
+
+  it("replays cost events cumulatively (matches live behavior)", () => {
+    useStore.getState().hydrateHistory([
+      {
+        kind: "cost",
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0.25,
+      },
+      {
+        kind: "cost",
+        inputTokens: 20,
+        outputTokens: 10,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0.5,
+      },
+    ]);
+    // Costs are per-turn deltas in the wire shape; the store sums them.
+    expect(useStore.getState().cost.costUsd).toBeCloseTo(0.75);
+  });
+
+  it("replays state-file events to the latest content", () => {
+    useStore.getState().hydrateHistory([
+      { kind: "state-file", content: "## Old" },
+      { kind: "state-file", content: "## Current Task\n\nrunning" },
+    ]);
+    expect(useStore.getState().stateFile).toContain("running");
+  });
+
+  it("preserves project and view across hydration (it's a transcript replay, not a context switch)", () => {
+    useStore.getState().setProject({
+      id: "p1",
+      name: "demo",
+      path: "/x",
+      lastSessionId: null,
+      lastOpenedAt: 0,
+    });
+    useStore.getState().setView("backlog");
+    useStore.getState().hydrateHistory([]);
+    expect(useStore.getState().project?.id).toBe("p1");
+    expect(useStore.getState().view).toBe("backlog");
+  });
+});
