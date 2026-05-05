@@ -17,7 +17,44 @@
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "brand-dev-electron": "node scripts/brand-dev-electron.cjs",
     "generate-icns": "node scripts/generate-icns.cjs",
-    "postinstall": "electron-rebuild -f -w better-sqlite3 && node scripts/brand-dev-electron.cjs && node scripts/generate-icns.cjs"
+    "postinstall": "electron-rebuild -f -w better-sqlite3 && node scripts/brand-dev-electron.cjs && node scripts/generate-icns.cjs",
+    "package": "pnpm build && pnpm generate-icns && electron-builder --mac --arm64 --dir && codesign --force --deep --sign - release/mac-arm64/Caffeine.app",
+    "package:dmg": "pnpm build && pnpm generate-icns && electron-builder --mac --arm64 && codesign --force --deep --sign - release/mac-arm64/Caffeine.app"
+  },
+  "build": {
+    "appId": "com.github.pavvann.caffeine",
+    "productName": "Caffeine",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!**/*.{md,test.ts,test.tsx,map}"
+    ],
+    "extraMetadata": {
+      "main": "out/main/index.js"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**/*",
+      "**/*.node"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "identity": null,
+      "target": [
+        {
+          "target": "default",
+          "arch": ["arm64"]
+        }
+      ]
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    }
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.123",
@@ -47,6 +84,7 @@
     "@vitest/ui": "^4.1.5",
     "autoprefixer": "^10.4.21",
     "electron": "^41.3.0",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "pngjs": "^7.0.0",
     "postcss": "^8.5.6",
