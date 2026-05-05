@@ -15,7 +15,8 @@
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
-    "postinstall": "electron-rebuild -f -w better-sqlite3"
+    "brand-dev-electron": "node scripts/brand-dev-electron.cjs",
+    "postinstall": "electron-rebuild -f -w better-sqlite3 && node scripts/brand-dev-electron.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.123",
