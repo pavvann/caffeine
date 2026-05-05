@@ -84,8 +84,10 @@ describe("runPipeline", () => {
       onIterationDecided: (i, d) => decisions.push({ i, d }),
     });
 
-    // 2 unchecked items × 2 stages = 4 pushed prompts
-    expect(pushSpy).toHaveBeenCalledTimes(4);
+    // 2 unchecked items × (1 implementer + 2 stages + 1 closing) = 8 pushed prompts.
+    // The implementer + closing beats per task ensure stages run on a
+    // real diff and the checkbox actually gets ticked at the end.
+    expect(pushSpy).toHaveBeenCalledTimes(8);
     expect(waitForBacklogDrain).toHaveBeenCalledTimes(1);
     expect(runCommand).toHaveBeenCalledTimes(1);
     expect(decisions).toEqual([{ i: 1, d: "done" }]);
@@ -150,6 +152,57 @@ describe("runPipeline", () => {
     const out = await readFile(join(dir, "BACKLOG.md"), "utf8");
     expect(out).toContain("[LOOP-1]");
     expect(out).toContain("`false-cmd` exited 1");
+  });
+
+  it("queues an IMPLEMENT beat before any per_task stage prompts (regression: stages must run on a real diff)", async () => {
+    // The bug this guards against: pre-v0.0.4, the orchestrator pushed
+    // only stage prompts ("Run the reviewer stage..."), no implementer
+    // prompt. The agent ran reviewer/security/tester on an empty diff
+    // before any code change happened. Order of bus messages per task
+    // must be: implement → stage(s) → close.
+    await seedBacklog("# Backlog\n\n- [ ] add feature X\n");
+    const pipeline = makePipeline({
+      per_task: ["reviewer", "security", "tester"],
+    });
+    const bus = new PromptBus();
+    const pushed: string[] = [];
+    const pushSpy = vi.spyOn(bus, "push").mockImplementation((m: string) => {
+      pushed.push(m);
+    });
+    const runCommand = vi.fn().mockResolvedValue(0);
+    const waitForBacklogDrain = vi.fn(async () => {
+      const md = await readFile(join(dir, "BACKLOG.md"), "utf8");
+      await writeFile(
+        join(dir, "BACKLOG.md"),
+        md.replace(/- \[ \]/g, "- [x]"),
+        "utf8",
+      );
+    });
+
+    await runPipeline(pipeline, dir, bus, stubQuery, {
+      runCommand,
+      waitForBacklogDrain,
+      requestDecision: decideStub,
+    });
+
+    // 1 task × (implement + 3 stages + close) = 5 prompts
+    expect(pushSpy).toHaveBeenCalledTimes(5);
+
+    // The implementer beat must come first.
+    expect(pushed[0]).toMatch(/Step 1 — IMPLEMENT/i);
+    expect(pushed[0]).toContain("add feature X");
+
+    // Then each stage in declared order.
+    expect(pushed[1]).toMatch(/Run the reviewer stage/);
+    expect(pushed[2]).toMatch(/Run the security stage/);
+    expect(pushed[3]).toMatch(/Run the tester stage/);
+
+    // Then the closing beat that ticks the checkbox.
+    expect(pushed[4]).toMatch(/Tick the checkbox/i);
+
+    // The implementer beat must reference staging the diff so the
+    // stages have something to inspect.
+    expect(pushed[0]).toMatch(/git add/);
   });
 
   it("(d) decider supplies targeted loop_tasks → those replace raw failure summaries in BACKLOG.md", async () => {

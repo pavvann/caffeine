@@ -125,7 +125,19 @@ export async function runPipeline(
     options.onIterationStart?.(iteration);
     emitSessionEvent({ kind: "iteration-started", iteration });
 
-    // 1. Push per_task stage prompts for every currently-unchecked item.
+    // 1. Queue prompts for every currently-unchecked backlog item.
+    //    Per task we push three beats in strict order:
+    //
+    //      a. Implement — main agent does the work, stages the diff.
+    //      b. per_task stages — reviewer/security/tester subagents
+    //         run AGAINST the staged diff from (a).
+    //      c. Close — agent ticks the BACKLOG.md checkbox and writes
+    //         a Lessons Learned line in STATE.md.
+    //
+    //    Without (a), the stages would run on an empty diff (the
+    //    bug fixed in v0.0.4). The agent processes bus messages
+    //    serially, so queueing all three beats per task in this
+    //    order is enough — no inter-beat synchronization needed.
     const backlog = await readBacklog(repoPath);
     const items = parseBacklog(backlog);
     const open = items.filter((item) => !item.checked);
@@ -134,6 +146,24 @@ export async function runPipeline(
       const item = open[i];
       const position = i + 1; // 1-indexed for the renderer's "Task X/Y"
       const total = open.length;
+
+      // a. Implementer beat. The v1 system prompt also tells the agent
+      //    to read STATE.md and follow the protocol, but the orchestrator
+      //    asserts authoritatively here so the agent doesn't drift into
+      //    running stages on un-implemented work.
+      bus.push(
+        `Pipeline iteration ${iteration}, task ${position}/${total}: "${item.text}".\n\n` +
+          `Step 1 — IMPLEMENT this task.\n` +
+          `- Read STATE.md if you need context from prior tasks.\n` +
+          `- Plan subtasks under "## Current Task" in STATE.md if non-trivial.\n` +
+          `- Make the actual code changes that satisfy the task description.\n` +
+          `- Run the verification commands listed in caffeine.config.json after meaningful edits. Do not proceed past a red gate.\n\n` +
+          `Step 2 — STAGE your changes with \`git add -A\` so the per_task subagents can read the staged diff.\n\n` +
+          `Do NOT tick the BACKLOG.md checkbox yet. The per_task stages run on your work next, ` +
+          `and a closing prompt will instruct you to tick the box once they pass.`,
+      );
+
+      // b. Per_task stage beats. One bus message per registered stage.
       for (const stageName of pipeline.per_task) {
         // Test hook receives the BACKLOG.md line index (stable);
         // the IPC event carries the 1-indexed position + total
@@ -147,9 +177,9 @@ export async function runPipeline(
           stageName,
         });
         bus.push(
-          `Run the ${stageName} stage on this backlog item: "${item.text}". ` +
-            `Invoke the ${stageName} subagent via the Agent tool, pass it the staged ` +
-            `diff, and ensure its findings reach STATE.md before you proceed.`,
+          `Run the ${stageName} stage on the just-implemented task "${item.text}". ` +
+            `Invoke the ${stageName} subagent via the Agent tool, pass it the staged diff, ` +
+            `and ensure its findings reach STATE.md before you proceed.`,
         );
         // We deliberately do NOT emit `stage-completed` here.
         // The orchestrator queues the prompt onto the bus but has
@@ -158,6 +188,18 @@ export async function runPipeline(
         // duration and ordering. A future phase can add a real
         // completion signal (e.g. STATE.md polling or a hook tap).
       }
+
+      // c. Closing beat. Without this the agent might leave the
+      //    checkbox unchecked even after stages pass, which keeps the
+      //    Stop hook blocking forever.
+      bus.push(
+        `All ${pipeline.per_task.length} per_task stage(s) have completed for "${item.text}".\n\n` +
+          `If any stage flagged real issues in STATE.md that you have not yet addressed, ` +
+          `fix them now and re-run the relevant stage(s). Otherwise:\n` +
+          `1. Tick the checkbox in BACKLOG.md for this task.\n` +
+          `2. Append a 1-2 line note to STATE.md under "## Lessons Learned".\n` +
+          `3. The orchestrator will queue the next task or end-of-iteration commands shortly.`,
+      );
     }
 
     // 2. Wait for the agent to drain the backlog. The runner's Stop
