@@ -6,3 +6,10 @@ dist
 .env
 .env.local
 .caffeine-pipeline-complete
+
+# Caffeine runtime artifacts — generated during agent runs, not source.
+# Track these in your own project repos if you want; they don't belong
+# in the Caffeine repo itself.
+BACKLOG.md
+STATE.md
+pipeline.md
