@@ -75,6 +75,28 @@ async function invokeStop(): Promise<HookJSONOutput> {
 }
 
 /**
+ * For tests that need to call the SAME hook closure multiple times
+ * (e.g. fixed-point detector), build hooks once and return a callable
+ * that always invokes that same registered Stop callback.
+ */
+function makePersistentStopInvoker() {
+  const hooks = buildHooks(REPO_PATH);
+  const cb = hooks.Stop?.[0]?.hooks?.[0];
+  if (!cb) throw new Error("Stop hook not registered");
+  return (lastAssistantMessage = "") => {
+    const input = {
+      hook_event_name: "Stop",
+      session_id: "test",
+      transcript_path: "/tmp/transcript",
+      cwd: REPO_PATH,
+      stop_hook_active: false,
+      last_assistant_message: lastAssistantMessage,
+    } as StopHookInput;
+    return cb(input, undefined, { signal: new AbortController().signal });
+  };
+}
+
+/**
  * Configure `access` so `pipeline.md` and/or the completion marker
  * appear "present" or "absent" depending on the test scenario.
  *
@@ -190,5 +212,78 @@ describe("Stop hook (pipeline mode)", () => {
     const result = await invokeStop();
 
     expect(result).toEqual({});
+  });
+});
+
+describe("Stop hook (fixed-point detector)", () => {
+  beforeEach(() => {
+    vi.mocked(readFile).mockReset();
+    vi.mocked(access).mockReset();
+    stageFilesystem(new Set());
+  });
+
+  it("blocks twice on identical state, then allows the stop on the third try", async () => {
+    // Same BACKLOG content + same final assistant message across three
+    // consecutive Stop invocations. Models the "Awaiting your input."
+    // spam loop: agent has correctly identified that remaining tasks
+    // are external blockers and keeps trying to stop with the same
+    // message, but the original hook would have blocked forever.
+    const backlog = "# Backlog\n\n- [ ] external blocker A\n- [ ] external blocker B\n";
+    vi.mocked(readFile).mockResolvedValue(backlog);
+
+    const stop = makePersistentStopInvoker();
+    const STUCK = "Awaiting your input.";
+
+    const r1 = await stop(STUCK);
+    expect(r1).toMatchObject({ decision: "block" });
+
+    const r2 = await stop(STUCK);
+    expect(r2).toMatchObject({ decision: "block" });
+
+    const r3 = await stop(STUCK);
+    expect(r3).toEqual({});
+  });
+
+  it("resets the stuck counter when BACKLOG.md changes (real progress)", async () => {
+    // First two stops on signature A, then BACKLOG mutates (a task
+    // got checked), then a third stop on signature B. The change
+    // should reset the counter — third stop blocks normally because
+    // it's a new signature, not the third strike on the old one.
+    vi.mocked(readFile)
+      .mockResolvedValueOnce("# Backlog\n- [ ] one\n- [ ] two\n")
+      .mockResolvedValueOnce("# Backlog\n- [ ] one\n- [ ] two\n")
+      .mockResolvedValueOnce("# Backlog\n- [x] one\n- [ ] two\n"); // task one now checked
+
+    const stop = makePersistentStopInvoker();
+
+    const r1 = await stop("stuck");
+    const r2 = await stop("stuck");
+    const r3 = await stop("stuck");
+
+    expect(r1).toMatchObject({ decision: "block" });
+    expect(r2).toMatchObject({ decision: "block" });
+    // Third call has a different BACKLOG signature → counter resets,
+    // hook blocks normally (rather than returning {} as a fixed-point).
+    expect(r3).toMatchObject({ decision: "block" });
+  });
+
+  it("resets the stuck counter when the agent's final message changes", async () => {
+    // BACKLOG stays put but the agent's final message changes — that
+    // counts as progress (the agent is reasoning, not just spamming).
+    const backlog = "# Backlog\n- [ ] open\n";
+    vi.mocked(readFile).mockResolvedValue(backlog);
+
+    const stop = makePersistentStopInvoker();
+
+    await stop("first attempt");
+    await stop("first attempt"); // stuckCount = 2 on signature A
+    const r3 = await stop("different reasoning here"); // signature changes
+    expect(r3).toMatchObject({ decision: "block" });
+
+    // Two more on the new signature would block, three would release.
+    const r4 = await stop("different reasoning here");
+    const r5 = await stop("different reasoning here");
+    expect(r4).toMatchObject({ decision: "block" });
+    expect(r5).toEqual({});
   });
 });

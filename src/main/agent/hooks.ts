@@ -30,12 +30,30 @@ function isDestructiveBash(input: unknown): boolean {
 }
 
 /**
+ * After the Stop hook has blocked this many times in a row WITHOUT any
+ * change to BACKLOG.md or to the agent's last assistant message, we let
+ * the agent stop. The hook was originally designed to keep the agent
+ * grinding through real work; without this escape, an agent that has
+ * correctly identified that all remaining tasks are external blockers
+ * (waiting on the user, waiting on an upstream patch) gets stuck in a
+ * "Awaiting your input." spam loop because the hook keeps refusing the
+ * stop. Three strikes = the agent has reached a fixed point. Let it go.
+ */
+const STUCK_THRESHOLD = 3;
+
+/**
  * Build the full hook config. The cwd is captured by closure so the Stop
  * hook can re-read BACKLOG.md to decide whether to keep the agent going.
+ *
+ * The closure also tracks per-session "stuck" state for the fixed-point
+ * detector — whenever buildHooks is called for a fresh session, those
+ * counters reset.
  */
 export function buildHooks(targetRepoPath: string): Partial<
   Record<HookEvent, HookCallbackMatcher[]>
 > {
+  let stuckCount = 0;
+  let lastSignature = "";
   return {
     PreToolUse: [
       {
@@ -135,16 +153,57 @@ export function buildHooks(targetRepoPath: string): Partial<
     Stop: [
       {
         hooks: [
-          async (): Promise<HookJSONOutput> => {
-            // The long-run trick: if BACKLOG.md still has unchecked
-            // items, refuse the stop so the agent has to keep going.
-            const open = await countOpenBacklogItems(targetRepoPath);
+          async (input): Promise<HookJSONOutput> => {
+            // Read BACKLOG.md once per hook fire — both the unchecked
+            // count and the fixed-point signature derive from the same
+            // content. Reading twice would double the I/O and trip
+            // mocked test fixtures that use `mockResolvedValueOnce`.
+            const backlog = await readBacklogText(targetRepoPath);
+            const open = countOpenItems(backlog);
             if (open > 0) {
+              // Fixed-point detector. Build a signature from BACKLOG.md
+              // contents + the agent's last assistant message. If we've
+              // blocked the same signature STUCK_THRESHOLD times in a
+              // row, the agent is making no progress and the right
+              // thing is to let it stop — the user will see whatever
+              // the agent's final message was and can intervene.
+              const stopInput =
+                input.hook_event_name === "Stop" ? input : null;
+              const signature = computeStuckSignature(
+                backlog,
+                stopInput?.last_assistant_message ?? "",
+              );
+              if (signature === lastSignature) {
+                stuckCount++;
+              } else {
+                stuckCount = 1;
+                lastSignature = signature;
+              }
+
+              if (stuckCount >= STUCK_THRESHOLD) {
+                // Reset so a fresh stuck-loop later in the session
+                // gets its own three strikes.
+                stuckCount = 0;
+                lastSignature = "";
+                emitSessionEvent({
+                  kind: "status",
+                  status: "idle",
+                  reason: `Agent halted with ${open} task(s) still open — appears stuck waiting on user input. Read the last message and intervene if you can unblock it.`,
+                  at: Date.now(),
+                });
+                return {};
+              }
+
               return {
                 decision: "block",
-                reason: `BACKLOG.md still has ${open} unchecked task(s). Continue with the protocol — pick the next task.`,
+                reason: `BACKLOG.md still has ${open} unchecked task(s). Continue with the protocol — pick the next task. If you genuinely cannot make progress on the remaining tasks (external blockers, waiting on user, etc.), say so once and stop trying; the runner will detect the fixed point.`,
               };
             }
+
+            // No open items — reset the fixed-point detector for any
+            // future stuck-loop in this session.
+            stuckCount = 0;
+            lastSignature = "";
 
             // Pipeline-mode extension: if `pipeline.md` is present and
             // the orchestrator has NOT yet dropped its completion
@@ -199,12 +258,38 @@ async function confirmDestructive(command: string): Promise<boolean> {
   return response === 1;
 }
 
-async function countOpenBacklogItems(repo: string): Promise<number> {
+async function readBacklogText(repo: string): Promise<string> {
   try {
-    const text = await readFile(join(repo, "BACKLOG.md"), "utf8");
-    const matches = text.match(/^\s*[-*]\s+\[\s\]\s+/gm);
-    return matches?.length ?? 0;
+    return await readFile(join(repo, "BACKLOG.md"), "utf8");
   } catch {
-    return 0;
+    return "";
   }
+}
+
+function countOpenItems(backlog: string): number {
+  const matches = backlog.match(/^\s*[-*]\s+\[\s\]\s+/gm);
+  return matches?.length ?? 0;
+}
+
+/**
+ * Cheap content-fingerprint of (BACKLOG.md state + last agent message).
+ * Used by the Stop hook to detect a fixed point — when the same
+ * signature appears N times in a row, the agent is stuck and we should
+ * let it actually stop. Not a cryptographic hash; we just want a stable
+ * string we can `===` compare across hook fires.
+ */
+function computeStuckSignature(
+  backlog: string,
+  lastAssistantMessage: string,
+): string {
+  // Use the full backlog content rather than just length — flipping a
+  // checkbox from `[ ]` to `[x]` keeps the file the same length, so a
+  // length-only fingerprint would falsely report "no progress" on what
+  // is in fact real progress. The strings are small (typical BACKLOG.md
+  // is single-digit KB) and we're just `===` comparing across calls.
+  // Trim the last message to 256 chars so an unusually long final
+  // assistant message doesn't dominate the comparison; that's enough
+  // to distinguish "Awaiting your input." from real reasoning.
+  const tail = (lastAssistantMessage ?? "").slice(0, 256);
+  return `${backlog} ${tail}`;
 }
