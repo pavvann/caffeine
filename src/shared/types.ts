@@ -128,6 +128,12 @@ export type SessionEvent =
   | IterationDecidedEvent
   | SubagentStateEvent;
 
+export type AgentSummary = {
+  name: string;
+  description: string;
+  source: "bundled" | "user";
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -159,6 +165,7 @@ export const IPC = {
   PipelineWrite: "pipeline:write",
   PipelineReadRaw: "pipeline:read-raw",
   PipelineWriteRaw: "pipeline:write-raw",
+  AgentsList: "agents:list",
   ConfigRead: "config:read",
   ConfigWrite: "config:write",
   SessionStart: "session:start",

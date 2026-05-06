@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
-import type { PipelineWireShape } from "@shared/types";
+import type { AgentSummary, PipelineWireShape } from "@shared/types";
 import { SegToggle, StatusBar } from "../components/StatusBar";
 import {
   IconBeaker,
@@ -28,8 +28,6 @@ const STAGE_META: Record<
   security: { sub: "secrets · authz · injection", Icon: IconShield },
   tester: { sub: "writes + runs tests", Icon: IconBeaker },
 };
-
-const PALETTE_AGENTS = ["reviewer", "security", "tester"];
 
 const FALLBACK_META = { sub: "stage subagent", Icon: IconCpu };
 
@@ -542,7 +540,13 @@ function CanonicalDCG({
   );
 }
 
-function Palette({ currentStages }: { currentStages: string[] }) {
+function Palette({
+  currentStages,
+  agents,
+}: {
+  currentStages: string[];
+  agents: AgentSummary[];
+}) {
   const onPaletteDragStart = (name: string) => (e: React.DragEvent) => {
     e.dataTransfer.effectAllowed = "copy";
     e.dataTransfer.setData(
@@ -573,37 +577,51 @@ function Palette({ currentStages }: { currentStages: string[] }) {
       >
         agents
       </span>
-      <div style={{ display: "flex", gap: 6 }}>
-        {PALETTE_AGENTS.map((name) => {
-          const used = currentStages.includes(name);
-          const meta = stageMeta(name);
-          return (
-            <div
-              key={name}
-              draggable
-              onDragStart={onPaletteDragStart(name)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "5px 10px",
-                border: "1px solid var(--border)",
-                background: "var(--surface)",
-                cursor: "grab",
-                opacity: used ? 0.4 : 1,
-              }}
-              title={used ? "already in pipeline" : "drag into per_task lane"}
-            >
-              <meta.Icon size={11} stroke="var(--text-3)" />
-              <span
-                className="mono"
-                style={{ fontSize: 11, color: "var(--text-2)" }}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {agents.length === 0 ? (
+          <span
+            className="mono"
+            style={{ fontSize: 10.5, color: "var(--text-4)" }}
+          >
+            no agents found · drop markdown files in agents/ at the repo root
+          </span>
+        ) : (
+          agents.map((agent) => {
+            const used = currentStages.includes(agent.name);
+            const meta = stageMeta(agent.name);
+            const titleHint = used
+              ? "already in pipeline"
+              : agent.source === "user"
+                ? `${agent.description} · custom (agents/${agent.name}.md)`
+                : agent.description;
+            return (
+              <div
+                key={agent.name}
+                draggable
+                onDragStart={onPaletteDragStart(agent.name)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "5px 10px",
+                  border: `1px solid ${agent.source === "user" ? "var(--violet)" : "var(--border)"}`,
+                  background: "var(--surface)",
+                  cursor: "grab",
+                  opacity: used ? 0.4 : 1,
+                }}
+                title={titleHint}
               >
-                {name}
-              </span>
-            </div>
-          );
-        })}
+                <meta.Icon size={11} stroke="var(--text-3)" />
+                <span
+                  className="mono"
+                  style={{ fontSize: 11, color: "var(--text-2)" }}
+                >
+                  {agent.name}
+                </span>
+              </div>
+            );
+          })
+        )}
       </div>
       <span
         className="mono"
@@ -869,6 +887,7 @@ export function Pipeline() {
   const [rawDirty, setRawDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
 
   const sessionRunning = status === "running" || status === "paused";
 
@@ -884,6 +903,14 @@ export function Pipeline() {
     };
   }, []);
 
+  // The decider isn't a per_task stage — it's the loop-control agent the
+  // orchestrator runs separately. Hide it from the drag-and-drop palette
+  // so a user can't accidentally place it in per_task.
+  const loadAgents = async () => {
+    const list = (await window.caffeine.agents.list()) as AgentSummary[];
+    setAgents(list.filter((a) => a.name !== "decider"));
+  };
+
   const pipeline = live ?? diskPipeline;
 
   const enterEdit = () => {
@@ -895,6 +922,7 @@ export function Pipeline() {
     });
     setMode("edit");
     setSaveError(null);
+    void loadAgents();
   };
 
   const enterRaw = async () => {
@@ -1019,7 +1047,7 @@ export function Pipeline() {
         </div>
       )}
       {mode === "edit" && draft && (
-        <Palette currentStages={draft.per_task} />
+        <Palette currentStages={draft.per_task} agents={agents} />
       )}
       {mode === "raw" ? (
         <PipelineRaw

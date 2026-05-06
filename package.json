@@ -31,7 +31,14 @@
     "files": [
       "out/**/*",
       "package.json",
-      "!**/*.{md,test.ts,test.tsx,map}"
+      "!**/*.{test.ts,test.tsx,map}"
+    ],
+    "extraResources": [
+      {
+        "from": "agents",
+        "to": "agents",
+        "filter": ["**/*.md"]
+      }
     ],
     "extraMetadata": {
       "main": "out/main/index.js"

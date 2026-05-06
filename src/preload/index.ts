@@ -21,6 +21,9 @@ const api = {
     writeRaw: (content: string) =>
       ipcRenderer.invoke(IPC.PipelineWriteRaw, content),
   },
+  agents: {
+    list: () => ipcRenderer.invoke(IPC.AgentsList),
+  },
   config: {
     read: () => ipcRenderer.invoke(IPC.ConfigRead),
     write: (cfg: unknown) => ipcRenderer.invoke(IPC.ConfigWrite, cfg),

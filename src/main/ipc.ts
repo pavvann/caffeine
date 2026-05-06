@@ -6,6 +6,7 @@ import { readBacklog, writeBacklog } from "./repo/backlog";
 import { readState, watchState } from "./repo/state";
 import { readConfig, writeConfig } from "./repo/config";
 import { readPipeline, writePipeline } from "./pipeline/parser";
+import { loadAgents } from "./agent/loader";
 import type { Pipeline } from "./pipeline/types";
 import {
   appendTranscriptEvent,
@@ -122,6 +123,17 @@ export function registerIpc(windowGetter: WindowGetter): void {
       throw err;
     }
   });
+  ipcMain.handle(IPC.AgentsList, async () => {
+    if (!activeRepoPath) return [];
+    const loaded = await loadAgents(activeRepoPath).catch(() => null);
+    if (!loaded) return [];
+    return Array.from(loaded.values()).map((a) => ({
+      name: a.name,
+      description: a.description,
+      source: a.source,
+    }));
+  });
+
   ipcMain.handle(IPC.PipelineWriteRaw, async (_e, content: string) => {
     if (!activeRepoPath) {
       return { ok: false, reason: "no-active-project" as const };

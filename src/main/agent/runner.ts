@@ -1,9 +1,6 @@
 import { query, type Options, type Query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { CAFFEINE_SYSTEM_PROMPT, composeUserPrompt } from "./prompts";
-import { REVIEWER_AGENT } from "./reviewer";
-import { SECURITY_AGENT } from "./security-agent";
-import { TESTER_AGENT } from "./tester-agent";
-import { DECIDER_AGENT } from "./decider-agent";
+import { loadAgents, toAgentsRecord } from "./loader";
 import { buildHooks } from "./hooks";
 import { PromptBus } from "./promptBus";
 import { emitSessionEvent } from "../ipc";
@@ -113,12 +110,11 @@ async function buildOptions(
     cwd: args.targetRepoPath,
     systemPrompt,
     allowedTools: ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "Agent"],
-    agents: {
-      reviewer: REVIEWER_AGENT,
-      security: SECURITY_AGENT,
-      tester: TESTER_AGENT,
-      decider: DECIDER_AGENT,
-    },
+    // Agents are discovered from markdown files: bundled `agents/*.md`
+    // ship with Caffeine, and any `agents/*.md` in the user's target
+    // repo override bundled defaults by name. Users can drop their
+    // own files to add custom stages.
+    agents: toAgentsRecord(await loadAgents(args.targetRepoPath)),
     hooks: buildHooks(args.targetRepoPath),
     resume: args.resumeSessionId,
     model: args.model ?? "claude-opus-4-7",
