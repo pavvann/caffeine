@@ -1,82 +1,103 @@
-import { useStore } from "../store";
+import type { ReactNode } from "react";
 
-export function StatusBar() {
-  const {
-    status,
-    statusReason,
-    cost,
-    currentPipeline,
-    currentTaskIndex,
-    currentTaskTotal,
-    currentStage,
-    currentIteration,
-    lastDecision,
-  } = useStore();
-  const dot =
-    status === "running"
-      ? "bg-emerald-500 animate-pulse"
-      : status === "paused"
-        ? "bg-amber-400"
-        : status === "error"
-          ? "bg-red-500"
-          : status === "stopping"
-            ? "bg-zinc-400"
-            : "bg-zinc-600";
-
-  const tokens = cost.inputTokens + cost.outputTokens;
-  const pipelineLabel = currentPipeline
-    ? formatPipelineLabel(
-        currentTaskIndex,
-        currentTaskTotal,
-        currentStage,
-        currentIteration,
-      )
-    : null;
-
+// Generic tab header used by Backlog, Pipeline, State, Settings.
+// The Session tab uses its own richer status header — see views/Session.tsx.
+export function StatusBar({
+  tabLabel,
+  sub,
+  right,
+}: {
+  tabLabel: string;
+  sub?: string;
+  right?: ReactNode;
+}) {
   return (
-    <div className="flex h-9 shrink-0 items-center gap-3 border-b border-zinc-800 bg-zinc-900/40 px-4 text-xs text-zinc-400">
-      <span className="flex items-center gap-2">
-        <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />
-        <span className="capitalize">{status}</span>
+    <div
+      style={{
+        height: 36,
+        padding: "0 16px",
+        borderBottom: "1px solid var(--border)",
+        background: "rgba(15,15,19,0.6)",
+        display: "flex",
+        alignItems: "center",
+        flexShrink: 0,
+        gap: 12,
+      }}
+    >
+      <span style={{ fontSize: 12, color: "var(--text-2)", fontWeight: 500 }}>
+        {tabLabel}
       </span>
-      {pipelineLabel && (
-        <span className="font-mono text-emerald-300/80">{pipelineLabel}</span>
+      {sub && (
+        <>
+          <span
+            style={{
+              width: 1,
+              height: 12,
+              background: "var(--border)",
+            }}
+          />
+          <span
+            className="mono"
+            style={{ fontSize: 11, color: "var(--text-3)" }}
+          >
+            {sub}
+          </span>
+        </>
       )}
-      {currentPipeline && lastDecision === "halt" && (
-        <span className="font-mono text-amber-300">halted (max iterations)</span>
+      {right && (
+        <div
+          style={{
+            marginLeft: "auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          {right}
+        </div>
       )}
-      {statusReason && <span className="text-zinc-500 truncate">{statusReason}</span>}
-      <div className="ml-auto flex items-center gap-4 font-mono">
-        <span>{formatTokens(tokens)} tok</span>
-        <span>${cost.costUsd.toFixed(4)}</span>
-      </div>
     </div>
   );
 }
 
-function formatTokens(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-  return `${(n / 1_000_000).toFixed(2)}M`;
-}
-
-function formatPipelineLabel(
-  taskIndex: number,
-  taskTotal: number,
-  stage: string | null,
-  iteration: number,
-): string {
-  // Renders the spec format: `Task <index>/<total> · <stageName> ·
-  // iteration <N>`. Before the first stage / iteration event of a
-  // fresh session the values are sentinel; render placeholders rather
-  // than confidently lying about iteration 1 when we haven't seen one.
-  const taskPart =
-    taskIndex >= 1 && taskTotal >= 1
-      ? `Task ${taskIndex}/${taskTotal}`
-      : "Task —";
-  const iterPart = iteration > 0 ? `iteration ${iteration}` : "iteration —";
-  const parts = [taskPart];
-  if (stage) parts.push(stage);
-  parts.push(iterPart);
-  return parts.join(" · ");
+export function SegToggle<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: T[];
+}) {
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        border: "1px solid var(--border)",
+        background: "var(--bg-2)",
+        padding: 1.5,
+      }}
+    >
+      {options.map((opt) => {
+        const active = value === opt;
+        return (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => onChange(opt)}
+            className="mono"
+            style={{
+              padding: "3px 10px",
+              fontSize: 11,
+              color: active ? "var(--text)" : "var(--text-3)",
+              background: active ? "var(--surface-2)" : "transparent",
+              textTransform: "lowercase",
+            }}
+          >
+            {opt}
+          </button>
+        );
+      })}
+    </div>
+  );
 }

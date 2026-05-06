@@ -1,616 +1,625 @@
-// Pipeline view — visual rendering of the DCG (Directed Cyclic Graph
-// with conditional edges) the user dropped at the repo root.
-//
-// Three lanes top-to-bottom: per_task stages, on_backlog_complete
-// commands, decider with conditional outputs. The cyclic edge from
-// the decider back to per_task is the thing that makes this a DCG and
-// not a DAG; we draw it as an explicit labeled SVG arc on the right
-// side of the graph so the user can see the loop is real, not implied.
-//
-// When a session is running, `currentPipeline` from the store takes
-// precedence — that's the pipeline the runner actually loaded. When
-// idle, we fetch pipeline.md via the IPC read so the view is useful
-// even before clicking Start.
-//
-// Edit mode (v0.0.4): per_task stages are drag-and-drop reorderable,
-// removable via the ✕ on each node, and addable from the palette
-// strip at the top. Save writes back to pipeline.md preserving the
-// markdown body. Edit is disabled while a session is running.
-
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 import type { PipelineWireShape } from "@shared/types";
-
-const AVAILABLE_AGENTS: { name: string; blurb: string }[] = [
-  {
-    name: "reviewer",
-    blurb: "adversarial diff critique",
-  },
-  {
-    name: "security",
-    blurb: "secrets, injection, missing authz",
-  },
-  {
-    name: "tester",
-    blurb: "writes tests for the changed code",
-  },
-];
+import { SegToggle, StatusBar } from "../components/StatusBar";
+import {
+  IconBeaker,
+  IconCheck,
+  IconCpu,
+  IconDrag,
+  IconEye,
+  IconShield,
+  IconTerminal,
+  IconX,
+} from "../components/Icons";
 
 type Mode = "read" | "edit" | "raw";
 
-export function Pipeline() {
-  const live = useStore((s) => s.currentPipeline);
-  const status = useStore((s) => s.status);
-  const currentStage = useStore((s) => s.currentStage);
-  const currentIteration = useStore((s) => s.currentIteration);
-  const lastDecision = useStore((s) => s.lastDecision);
-  const taskIndex = useStore((s) => s.currentTaskIndex);
-  const taskTotal = useStore((s) => s.currentTaskTotal);
+const STAGE_DRAG_TYPE = "application/x-caffeine-stage";
 
-  const [diskPipeline, setDiskPipeline] = useState<PipelineWireShape | null>(
-    null,
-  );
-  const [loaded, setLoaded] = useState(false);
-  const [mode, setMode] = useState<Mode>("read");
-  const [draft, setDraft] = useState<PipelineWireShape | null>(null);
-  const [rawDraft, setRawDraft] = useState<string>("");
-  const [rawDraftDirty, setRawDraftDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  const sessionRunning = status === "running" || status === "paused";
-
-  useEffect(() => {
-    let cancelled = false;
-    void window.caffeine.pipeline.read().then((p) => {
-      if (cancelled) return;
-      setDiskPipeline(p as PipelineWireShape | null);
-      setLoaded(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Live overrides disk while a session is running.
-  const pipeline = live ?? diskPipeline;
-
-  const enterEdit = () => {
-    if (!pipeline) return;
-    setDraft({
-      per_task: [...pipeline.per_task],
-      on_backlog_complete: pipeline.on_backlog_complete.map((s) => ({ ...s })),
-      decider: { ...pipeline.decider },
-    });
-    setMode("edit");
-    setSaveError(null);
-  };
-
-  const enterRaw = async () => {
-    setSaveError(null);
-    const raw = (await window.caffeine.pipeline.readRaw()) as string | null;
-    setRawDraft(raw ?? "");
-    setRawDraftDirty(false);
-    setMode("raw");
-  };
-
-  const enterRead = () => {
-    setDraft(null);
-    setRawDraft("");
-    setRawDraftDirty(false);
-    setMode("read");
-    setSaveError(null);
-  };
-
-  const saveEdit = async () => {
-    if (!draft) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      const result = (await window.caffeine.pipeline.write(draft)) as
-        | { ok: true }
-        | { ok: false; reason: string };
-      if (!result?.ok) {
-        setSaveError(result?.reason ?? "unknown error");
-        return;
-      }
-      setDiskPipeline(draft);
-      enterRead();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const saveRaw = async () => {
-    setSaving(true);
-    setSaveError(null);
-    try {
-      const result = (await window.caffeine.pipeline.writeRaw(rawDraft)) as
-        | { ok: true }
-        | { ok: false; reason: string };
-      if (!result?.ok) {
-        setSaveError(result?.reason ?? "unknown error");
-        return;
-      }
-      // Re-fetch the parsed view so the DCG reflects the new content.
-      // If the raw save introduced bad YAML, parsed read returns null
-      // and the Read tab will show EmptyState — that's the honest
-      // signal that the save broke the parser.
-      const reparsed = (await window.caffeine.pipeline.read()) as
-        | PipelineWireShape
-        | null;
-      setDiskPipeline(reparsed);
-      enterRead();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (!loaded) {
-    return (
-      <div className="grid h-full place-items-center text-sm text-zinc-500">
-        Loading pipeline…
-      </div>
-    );
+const STAGE_META: Record<
+  string,
+  {
+    sub: string;
+    Icon: (p: { size?: number; stroke?: string }) => React.ReactElement;
   }
+> = {
+  reviewer: { sub: "adversarial diff critique", Icon: IconEye },
+  security: { sub: "secrets · authz · injection", Icon: IconShield },
+  tester: { sub: "writes + runs tests", Icon: IconBeaker },
+};
 
-  // EmptyState is only shown in Read/Edit modes — Raw mode lets the
-  // user create or fix a missing/broken pipeline.md from scratch.
-  if (!pipeline && mode !== "raw") {
-    return (
-      <div className="flex h-full flex-col">
-        <Header
-          pipeline={null}
-          iteration={0}
-          taskIndex={0}
-          taskTotal={0}
-          mode={mode}
-          sessionRunning={sessionRunning}
-          saving={saving}
-          dirty={false}
-          onMode={(m) => {
-            if (m === "raw") void enterRaw();
-            else if (m === "edit") enterEdit();
-            else enterRead();
-          }}
-          onSave={saveEdit}
-          onDiscard={enterRead}
-        />
-        <EmptyState />
-      </div>
-    );
-  }
+const PALETTE_AGENTS = ["reviewer", "security", "tester"];
 
-  // Source of truth for what the DCG renders.
-  const display =
-    mode === "edit" && draft ? draft : (pipeline as PipelineWireShape | null);
+const FALLBACK_META = { sub: "stage subagent", Icon: IconCpu };
 
-  return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <Header
-        pipeline={display}
-        iteration={currentIteration}
-        taskIndex={taskIndex}
-        taskTotal={taskTotal}
-        mode={mode}
-        sessionRunning={sessionRunning}
-        saving={saving}
-        dirty={mode === "edit" ? draft !== null : rawDraftDirty}
-        onMode={(m) => {
-          if (m === "raw") void enterRaw();
-          else if (m === "edit") enterEdit();
-          else enterRead();
-        }}
-        onSave={mode === "raw" ? saveRaw : saveEdit}
-        onDiscard={enterRead}
-      />
-      {saveError && (
-        <div className="border-b border-red-900/60 bg-red-950/30 px-4 py-2 text-xs text-red-300">
-          Save failed: <span className="font-mono">{saveError}</span>
-        </div>
-      )}
-      {mode === "edit" && draft && (
-        <Palette currentStages={draft.per_task} />
-      )}
-      {mode === "raw" ? (
-        <RawEditor
-          value={rawDraft}
-          onChange={(v) => {
-            setRawDraft(v);
-            setRawDraftDirty(true);
-          }}
-        />
-      ) : (
-        display && (
-          <div className="flex-1 px-8 py-6">
-            <Graph
-              pipeline={display}
-              activeStage={mode === "edit" ? null : currentStage}
-              iteration={mode === "edit" ? 0 : currentIteration}
-              decision={mode === "edit" ? null : lastDecision}
-              editing={mode === "edit"}
-              onPerTaskChange={(stages) =>
-                setDraft((d) => (d ? { ...d, per_task: stages } : d))
-              }
-            />
-          </div>
-        )
-      )}
-    </div>
-  );
+function stageMeta(name: string) {
+  return STAGE_META[name] ?? FALLBACK_META;
 }
 
-function RawEditor({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (next: string) => void;
-}) {
-  return (
-    <div className="flex flex-1 flex-col">
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        spellCheck={false}
-        placeholder="---&#10;per_task:&#10;  - reviewer&#10;on_backlog_complete:&#10;  - run: pnpm test&#10;decider:&#10;  max_iterations: 1&#10;---&#10;&#10;# Pipeline rationale here…"
-        className="flex-1 resize-none bg-zinc-950 p-6 font-mono text-sm leading-6 text-zinc-200 placeholder:text-zinc-700 focus:outline-none"
-      />
-    </div>
-  );
-}
+type StageStatus = "queued" | "active" | "done";
 
-function EmptyState() {
-  return (
-    <div className="grid h-full place-items-center px-6 text-center text-sm text-zinc-500">
-      <div>
-        <div className="mb-2 text-zinc-400">No pipeline.md in this project.</div>
-        <div className="font-mono text-xs text-zinc-600">
-          Drop a <span className="text-zinc-300">pipeline.md</span> at the repo
-          root to enable pipeline mode.
-        </div>
-        <div className="mt-3 text-[11px] text-zinc-600">
-          See <span className="font-mono">CHANGELOG.md</span> for the YAML
-          frontmatter format.
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Header({
-  pipeline,
-  iteration,
-  taskIndex,
-  taskTotal,
-  mode,
-  sessionRunning,
-  saving,
-  dirty,
-  onMode,
-  onSave,
-  onDiscard,
-}: {
-  pipeline: PipelineWireShape | null;
-  iteration: number;
-  taskIndex: number;
-  taskTotal: number;
-  mode: Mode;
-  sessionRunning: boolean;
-  saving: boolean;
-  dirty: boolean;
-  onMode: (mode: Mode) => void;
-  onSave: () => void;
-  onDiscard: () => void;
-}) {
-  const max = pipeline?.decider.max_iterations ?? 0;
-  const iterDisplay =
-    pipeline && iteration > 0 ? `${iteration} / ${max}` : null;
-  const taskDisplay =
-    taskIndex >= 1 && taskTotal >= 1 ? `${taskIndex} / ${taskTotal}` : null;
-
-  const editingMode = mode === "edit" || mode === "raw";
-
-  return (
-    <div className="flex h-9 shrink-0 items-center gap-4 border-b border-zinc-800 bg-zinc-900/40 px-4 text-xs text-zinc-400">
-      <span className="font-mono text-zinc-300">pipeline.md</span>
-      {!editingMode && iterDisplay && (
-        <>
-          <span>·</span>
-          <span>
-            Iteration{" "}
-            <span className="font-mono text-zinc-200">{iterDisplay}</span>
-          </span>
-          {taskDisplay && (
-            <>
-              <span>·</span>
-              <span>
-                Task{" "}
-                <span className="font-mono text-zinc-200">{taskDisplay}</span>
-              </span>
-            </>
-          )}
-        </>
-      )}
-      {mode === "edit" && (
-        <span className="font-mono text-amber-300">editing (visual)</span>
-      )}
-      {mode === "raw" && (
-        <span className="font-mono text-amber-300">
-          editing (raw){dirty ? " · unsaved" : ""}
-        </span>
-      )}
-      <div className="ml-auto flex items-center gap-2">
-        <ModeToggle
-          mode={mode}
-          sessionRunning={sessionRunning}
-          hasPipeline={pipeline !== null}
-          saving={saving}
-          onMode={onMode}
-        />
-        {editingMode && (
-          <>
-            <div className="ml-1 h-4 w-px bg-zinc-800" />
-            <button
-              type="button"
-              onClick={onDiscard}
-              disabled={saving}
-              className="rounded border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-            >
-              Discard
-            </button>
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={saving}
-              className="rounded bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ModeToggle({
-  mode,
-  sessionRunning,
-  hasPipeline,
-  saving,
-  onMode,
-}: {
-  mode: Mode;
-  sessionRunning: boolean;
-  hasPipeline: boolean;
-  saving: boolean;
-  onMode: (mode: Mode) => void;
-}) {
-  // Edit mode requires a parsed pipeline (the drag-and-drop view
-  // operates on the structured shape). Raw mode works even with a
-  // missing or broken pipeline.md so it can be used to fix it.
-  // Sessions running disables both editing modes — pipeline can't be
-  // changed mid-flight without confusing the orchestrator.
-  const canEdit = !sessionRunning && hasPipeline && !saving;
-  const canRaw = !sessionRunning && !saving;
-
-  const buttons: Array<{
-    id: Mode;
-    label: string;
-    disabled: boolean;
-    title?: string;
-  }> = [
-    { id: "read", label: "Read", disabled: saving },
-    {
-      id: "edit",
-      label: "Edit",
-      disabled: !canEdit,
-      title: sessionRunning
-        ? "Stop the session to edit"
-        : !hasPipeline
-          ? "No pipeline.md to edit — use Raw to create one"
-          : undefined,
-    },
-    {
-      id: "raw",
-      label: "Raw",
-      disabled: !canRaw,
-      title: sessionRunning ? "Stop the session to edit" : undefined,
-    },
-  ];
-
-  return (
-    <div className="flex items-center rounded border border-zinc-800 bg-zinc-950 p-0.5">
-      {buttons.map((btn) => {
-        const active = mode === btn.id;
-        return (
-          <button
-            key={btn.id}
-            type="button"
-            onClick={() => onMode(btn.id)}
-            disabled={btn.disabled}
-            title={btn.title}
-            className={`rounded px-2 py-0.5 text-[11px] transition disabled:cursor-not-allowed disabled:opacity-40 ${
-              active
-                ? "bg-zinc-800 text-zinc-100"
-                : "text-zinc-400 hover:text-zinc-200"
-            }`}
-          >
-            {btn.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Palette (visible only in edit mode)
-// ---------------------------------------------------------------------------
-
-function Palette({ currentStages }: { currentStages: string[] }) {
-  return (
-    <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 bg-zinc-950/80 px-4 py-2 text-[11px] text-zinc-500">
-      <span className="font-mono text-zinc-400">Available agents</span>
-      <span className="text-zinc-600">— drag into the per_task lane</span>
-      <div className="flex items-center gap-2">
-        {AVAILABLE_AGENTS.map((agent) => {
-          const alreadyUsed = currentStages.includes(agent.name);
-          return (
-            <PaletteItem
-              key={agent.name}
-              name={agent.name}
-              blurb={agent.blurb}
-              dimmed={alreadyUsed}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function PaletteItem({
+function StageChip({
   name,
-  blurb,
-  dimmed,
+  status,
 }: {
   name: string;
-  blurb: string;
-  dimmed: boolean;
+  status: StageStatus;
 }) {
-  const onDragStart = (e: React.DragEvent<HTMLDivElement>) => {
+  const meta = stageMeta(name);
+  const isActive = status === "active";
+  const dotColor =
+    status === "active"
+      ? "var(--emerald)"
+      : status === "done"
+        ? "var(--text-3)"
+        : "var(--text-4)";
+
+  return (
+    <div
+      className={isActive ? "stage-glow" : ""}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        padding: "8px 12px",
+        border: `1px solid ${isActive ? "var(--emerald)" : "var(--border)"}`,
+        background: isActive ? "rgba(16,185,129,0.06)" : "var(--surface)",
+        minWidth: 168,
+      }}
+    >
+      <span
+        style={{
+          width: 26,
+          height: 26,
+          background: isActive ? "rgba(16,185,129,0.15)" : "var(--bg-2)",
+          border: `1px solid ${isActive ? "var(--emerald)" : "var(--border)"}`,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: isActive ? "var(--emerald-300)" : "var(--text-3)",
+        }}
+      >
+        <meta.Icon size={13} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          className="mono"
+          style={{
+            fontSize: 12,
+            color: isActive ? "var(--text)" : "var(--text-2)",
+            fontWeight: 600,
+          }}
+        >
+          {name}
+        </div>
+        <div
+          style={{
+            fontSize: 10,
+            color: "var(--text-4)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {meta.sub}
+        </div>
+      </div>
+      <span
+        className={isActive ? "dot-pulse-emerald" : ""}
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          background: dotColor,
+        }}
+      />
+    </div>
+  );
+}
+
+function CmdChip({ cmd }: { cmd: string }) {
+  return (
+    <div
+      className="mono"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 11px",
+        border: "1px solid var(--border)",
+        background: "var(--surface)",
+        fontSize: 11.5,
+        color: "var(--text-2)",
+      }}
+    >
+      <IconTerminal size={11} stroke="var(--text-4)" />
+      <span style={{ color: "var(--text-4)" }}>$</span>
+      <span>{cmd}</span>
+    </div>
+  );
+}
+
+function Arrow({
+  width = 28,
+  color = "var(--text-4)",
+}: {
+  width?: number;
+  color?: string;
+}) {
+  return (
+    <svg width={width} height={14} style={{ flexShrink: 0 }}>
+      <line x1="2" y1="7" x2={width - 8} y2="7" stroke={color} strokeWidth="1" />
+      <path
+        d={`M${width - 8} 3 L${width - 2} 7 L${width - 8} 11`}
+        fill="none"
+        stroke={color}
+        strokeWidth="1"
+      />
+    </svg>
+  );
+}
+
+function DownArrow() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "center",
+        height: 8,
+        marginTop: -10,
+        marginBottom: -10,
+      }}
+    >
+      <svg width="14" height="20">
+        <line x1="7" y1="0" x2="7" y2="14" stroke="var(--text-4)" />
+        <path d="M2 10 L7 16 L12 10" fill="none" stroke="var(--text-4)" />
+      </svg>
+    </div>
+  );
+}
+
+function Lane({
+  kind,
+  count,
+  accent,
+  headerRight,
+  children,
+}: {
+  kind: string;
+  count: string;
+  accent: string;
+  headerRight?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border)",
+        background: "rgba(15,15,19,0.5)",
+        padding: 14,
+        position: "relative",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 9,
+          marginBottom: 12,
+        }}
+      >
+        <span style={{ width: 3, height: 12, background: accent }} />
+        <span
+          className="mono"
+          style={{
+            fontSize: 10.5,
+            color: "var(--text-2)",
+            textTransform: "uppercase",
+            letterSpacing: 1,
+            fontWeight: 600,
+          }}
+        >
+          {kind}
+        </span>
+        <span
+          className="mono"
+          style={{ fontSize: 10, color: "var(--text-4)" }}
+        >
+          {count}
+        </span>
+        {headerRight && <div style={{ marginLeft: "auto" }}>{headerRight}</div>}
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 0,
+          flexWrap: "wrap",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ConditionalEdge({
+  label,
+  color,
+  terminal,
+  active,
+}: {
+  label: string;
+  color: string;
+  terminal: string;
+  active?: boolean;
+}) {
+  const muted = !active;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        opacity: muted ? 0.55 : 1,
+      }}
+    >
+      <svg width="36" height="14" style={{ flexShrink: 0 }}>
+        <line
+          x1="0"
+          y1="7"
+          x2="28"
+          y2="7"
+          stroke={color}
+          strokeWidth={active ? 1.4 : 1}
+          strokeDasharray={muted ? "3 3" : "0"}
+        />
+        <path
+          d="M28 4 L34 7 L28 10"
+          fill="none"
+          stroke={color}
+          strokeWidth={active ? 1.4 : 1}
+        />
+      </svg>
+      <span
+        className="mono"
+        style={{
+          fontSize: 10,
+          color,
+          padding: "1px 6px",
+          border: `1px solid ${color}`,
+          background: muted ? "transparent" : "rgba(251,191,36,0.06)",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        className="mono"
+        style={{
+          fontSize: 10.5,
+          color: muted ? "var(--text-4)" : "var(--text-2)",
+        }}
+      >
+        {terminal}
+      </span>
+    </div>
+  );
+}
+
+function FeedbackArc({ active }: { active: boolean }) {
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "absolute",
+        top: 0,
+        right: -8,
+        bottom: 0,
+        width: 56,
+        pointerEvents: "none",
+      }}
+    >
+      <svg
+        width="56"
+        height="100%"
+        viewBox="0 0 56 480"
+        preserveAspectRatio="none"
+      >
+        <defs>
+          <marker
+            id="arrow-amber"
+            viewBox="0 0 10 10"
+            refX="6"
+            refY="5"
+            markerWidth="8"
+            markerHeight="8"
+            orient="auto"
+          >
+            <path d="M0 0 L10 5 L0 10 Z" fill="var(--amber)" />
+          </marker>
+        </defs>
+        <path
+          d="M 8 420 C 50 420, 50 60, 8 60"
+          stroke="var(--amber)"
+          strokeWidth={active ? 1.4 : 1}
+          strokeDasharray={active ? "0" : "4 4"}
+          fill="none"
+          className={active ? "" : "arc-flow"}
+          markerEnd="url(#arrow-amber)"
+          style={
+            active
+              ? { filter: "drop-shadow(0 0 6px rgba(251,191,36,0.5))" }
+              : { opacity: 0.55 }
+          }
+        />
+        <text
+          x="42"
+          y="240"
+          fontSize="10"
+          fontFamily="var(--mono)"
+          fill="var(--amber)"
+          textAnchor="middle"
+          transform="rotate(90 42 240)"
+          letterSpacing="1.5"
+        >
+          LOOP
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+function CanonicalDCG({
+  pipeline,
+  activeStage,
+  iteration,
+  decision,
+}: {
+  pipeline: PipelineWireShape;
+  activeStage: string | null;
+  iteration: number;
+  decision: "done" | "loop" | "halt" | null;
+}) {
+  return (
+    <div
+      style={{
+        position: "relative",
+        padding: "20px 24px 24px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 20,
+      }}
+    >
+      <Lane
+        kind="per_task"
+        count={`${pipeline.per_task.length} stages · runs for every backlog item`}
+        accent="var(--emerald)"
+        headerRight={
+          <span
+            className="mono"
+            style={{ fontSize: 10, color: "var(--text-3)" }}
+          >
+            for each [task] in BACKLOG.md
+          </span>
+        }
+      >
+        {pipeline.per_task.map((name, i) => {
+          const status: StageStatus =
+            activeStage === name
+              ? "active"
+              : activeStage &&
+                  pipeline.per_task.indexOf(activeStage) > i
+                ? "done"
+                : "queued";
+          return (
+            <Fragment key={name + i}>
+              <StageChip name={name} status={status} />
+              {i < pipeline.per_task.length - 1 && (
+                <Arrow
+                  color={status === "done" ? "var(--emerald)" : "var(--text-4)"}
+                />
+              )}
+            </Fragment>
+          );
+        })}
+      </Lane>
+
+      <DownArrow />
+
+      <Lane
+        kind="on_backlog_complete"
+        count={`${pipeline.on_backlog_complete.length} commands · runs once when backlog drains`}
+        accent="var(--violet)"
+        headerRight={
+          <span
+            className="mono"
+            style={{ fontSize: 10, color: "var(--text-3)" }}
+          >
+            fast → slow ordering
+          </span>
+        }
+      >
+        {pipeline.on_backlog_complete.map((step, i) => (
+          <Fragment key={i}>
+            <CmdChip cmd={step.run} />
+            {i < pipeline.on_backlog_complete.length - 1 && <Arrow />}
+          </Fragment>
+        ))}
+      </Lane>
+
+      <DownArrow />
+
+      <Lane
+        kind="decider"
+        count={`agentic · iter ${iteration || "—"} / ${pipeline.decider.max_iterations}`}
+        accent="var(--amber)"
+        headerRight={
+          pipeline.decider.cost_ceiling_per_iteration_usd != null && (
+            <span
+              className="mono"
+              style={{ fontSize: 10, color: "var(--text-3)" }}
+            >
+              cost ceiling ${pipeline.decider.cost_ceiling_per_iteration_usd} /
+              iteration
+            </span>
+          )
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "12px 16px",
+            border: "1px solid var(--border-2)",
+            background: "var(--surface-2)",
+            minWidth: 240,
+          }}
+        >
+          <span
+            style={{
+              width: 28,
+              height: 28,
+              background: "rgba(251,191,36,0.1)",
+              border: "1px solid rgba(251,191,36,0.4)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--amber)",
+            }}
+          >
+            <IconCpu size={14} />
+          </span>
+          <div>
+            <div
+              className="mono"
+              style={{
+                fontSize: 12,
+                color: "var(--text)",
+                fontWeight: 600,
+              }}
+            >
+              decider
+            </div>
+            <div style={{ fontSize: 10, color: "var(--text-4)" }}>
+              reads STATE.md + diff + test failures
+            </div>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            marginLeft: 12,
+          }}
+        >
+          <ConditionalEdge
+            label="done"
+            color="var(--emerald)"
+            terminal="ship"
+            active={decision === "done"}
+          />
+          <ConditionalEdge
+            label="loop"
+            color="var(--amber)"
+            terminal={`append loop_tasks → BACKLOG${iteration > 0 ? ` (iter ${iteration})` : ""}`}
+            active={decision === "loop"}
+          />
+          <ConditionalEdge
+            label="halt"
+            color="var(--red)"
+            terminal="stop · report failure"
+            active={decision === "halt"}
+          />
+        </div>
+      </Lane>
+
+      <FeedbackArc active={decision === "loop"} />
+    </div>
+  );
+}
+
+function Palette({ currentStages }: { currentStages: string[] }) {
+  const onPaletteDragStart = (name: string) => (e: React.DragEvent) => {
     e.dataTransfer.effectAllowed = "copy";
     e.dataTransfer.setData(
-      "application/x-caffeine-stage",
+      STAGE_DRAG_TYPE,
       JSON.stringify({ kind: "palette", name }),
     );
   };
 
   return (
     <div
-      draggable
-      onDragStart={onDragStart}
-      title={blurb}
-      className={`cursor-grab rounded border px-2 py-0.5 text-xs transition ${
-        dimmed
-          ? "border-zinc-800 bg-zinc-900/40 text-zinc-600"
-          : "border-zinc-700 bg-zinc-900 text-zinc-200 hover:border-emerald-700 hover:text-emerald-200"
-      }`}
+      style={{
+        padding: "10px 24px",
+        borderBottom: "1px solid var(--border)",
+        background: "var(--bg-2)",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}
     >
-      {name}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Graph
-// ---------------------------------------------------------------------------
-
-type Decision = "done" | "loop" | "halt" | null;
-
-function Graph({
-  pipeline,
-  activeStage,
-  iteration,
-  decision,
-  editing,
-  onPerTaskChange,
-}: {
-  pipeline: PipelineWireShape;
-  activeStage: string | null;
-  iteration: number;
-  decision: Decision;
-  editing: boolean;
-  onPerTaskChange: (stages: string[]) => void;
-}) {
-  const running = iteration > 0;
-
-  return (
-    <div className="relative mx-auto max-w-3xl">
-      <Lane
-        title="per_task"
-        subtitle="runs for each unchecked BACKLOG.md item"
+      <span
+        className="mono"
+        style={{
+          fontSize: 10,
+          color: "var(--text-4)",
+          textTransform: "uppercase",
+          letterSpacing: 0.8,
+        }}
       >
-        {editing ? (
-          <PerTaskLaneEditable
-            stages={pipeline.per_task}
-            onChange={onPerTaskChange}
-          />
-        ) : (
-          <PerTaskLaneReadOnly
-            stages={pipeline.per_task}
-            activeStage={activeStage}
-          />
-        )}
-      </Lane>
-
-      <DownArrow label="all backlog items checked" />
-
-      <Lane title="on_backlog_complete" subtitle="ran once per iteration">
-        <div className="flex flex-wrap items-center gap-2">
-          {pipeline.on_backlog_complete.map((step, i) => (
-            <div key={step.run + i} className="flex items-center gap-2">
-              <Node label={step.run} kind="command" active={false} />
-              {i < pipeline.on_backlog_complete.length - 1 && <ArrowRight />}
+        agents
+      </span>
+      <div style={{ display: "flex", gap: 6 }}>
+        {PALETTE_AGENTS.map((name) => {
+          const used = currentStages.includes(name);
+          const meta = stageMeta(name);
+          return (
+            <div
+              key={name}
+              draggable
+              onDragStart={onPaletteDragStart(name)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "5px 10px",
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                cursor: "grab",
+                opacity: used ? 0.4 : 1,
+              }}
+              title={used ? "already in pipeline" : "drag into per_task lane"}
+            >
+              <meta.Icon size={11} stroke="var(--text-3)" />
+              <span
+                className="mono"
+                style={{ fontSize: 11, color: "var(--text-2)" }}
+              >
+                {name}
+              </span>
             </div>
-          ))}
-        </div>
-      </Lane>
-
-      <DownArrow label="exit code → decider" />
-
-      <Lane title="decider" subtitle="agent — reads STATE.md, decides">
-        <DeciderNode decision={decision} running={running} />
-      </Lane>
-
-      <CyclicLoopArc highlighted={decision === "loop"} />
+          );
+        })}
+      </div>
+      <span
+        className="mono"
+        style={{
+          marginLeft: "auto",
+          fontSize: 10.5,
+          color: "var(--text-4)",
+        }}
+      >
+        drag into per_task · drop where you want it
+      </span>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// per_task lane — read-only and editable variants
-// ---------------------------------------------------------------------------
-
-function PerTaskLaneReadOnly({
-  stages,
-  activeStage,
-}: {
-  stages: string[];
-  activeStage: string | null;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      {stages.map((stageName, i) => (
-        <div key={stageName + i} className="flex items-center gap-2">
-          <Node
-            label={stageName}
-            kind="stage"
-            active={activeStage === stageName}
-          />
-          {i < stages.length - 1 && <ArrowRight />}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-const STAGE_DRAG_TYPE = "application/x-caffeine-stage";
-
-/**
- * Editable per_task lane. The whole lane is the drop target — a tiny
- * gap-only target was unreliable in practice (8px is too small to hit
- * consistently and the browser animates the chip back to source on a
- * missed drop, which looked like the reorder didn't stick).
- *
- * On dragover we walk the rendered stage chips, compare cursor X to
- * each chip's horizontal midpoint, and derive an insertion index. A
- * vertical green bar renders at that index so the user sees exactly
- * where the chip will land.
- */
-function PerTaskLaneEditable({
+function EditableLane({
   stages,
   onChange,
 }: {
@@ -666,7 +675,7 @@ function PerTaskLaneEditable({
       return;
     }
     if (payload.kind === "stage") {
-      if (payload.from === at || payload.from + 1 === at) return; // no-op
+      if (payload.from === at || payload.from + 1 === at) return;
       const next = [...stages];
       const [moved] = next.splice(payload.from, 1);
       const adjusted = at > payload.from ? at - 1 : at;
@@ -693,72 +702,72 @@ function PerTaskLaneEditable({
       onDragOver={onLaneDragOver}
       onDrop={onLaneDrop}
       onDragLeave={(e) => {
-        // Only clear when leaving the lane container itself; React
-        // dragleave fires when crossing between children too.
         if (e.currentTarget === e.target) setInsertAt(null);
       }}
-      className="flex min-h-[2.75rem] flex-wrap items-center gap-1 rounded p-1"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        flexWrap: "wrap",
+        minHeight: 56,
+        padding: 4,
+        border: "1px dashed var(--border-2)",
+      }}
     >
-      {stages.map((stageName, i) => (
-        <Fragment key={stageName + ":" + i}>
-          {insertAt === i && <DropIndicator />}
-          <DraggableStage
-            name={stageName}
-            removable={stages.length > 1}
-            dimmed={dragIndex === i}
-            onDragStart={onStageDragStart(i)}
-            onDragEnd={() => {
-              setDragIndex(null);
-              setInsertAt(null);
-            }}
-            onRemove={onRemove(i)}
-          />
-        </Fragment>
-      ))}
+      {stages.map((name, i) => {
+        const meta = stageMeta(name);
+        const dimmed = dragIndex === i;
+        return (
+          <Fragment key={name + ":" + i}>
+            {insertAt === i && <DropIndicator />}
+            <div
+              draggable
+              data-caffeine-stage="true"
+              onDragStart={onStageDragStart(i)}
+              onDragEnd={() => {
+                setDragIndex(null);
+                setInsertAt(null);
+              }}
+              className="group"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 12px",
+                border: "1px solid var(--border)",
+                background: dimmed ? "rgba(255,255,255,0.02)" : "var(--surface)",
+                color: dimmed ? "var(--text-4)" : "var(--text-2)",
+                cursor: "grab",
+              }}
+            >
+              <span style={{ color: "var(--text-4)" }}>
+                <IconDrag size={11} />
+              </span>
+              <meta.Icon size={11} stroke="var(--text-3)" />
+              <span className="mono" style={{ fontSize: 12, fontWeight: 600 }}>
+                {name}
+              </span>
+              {stages.length > 1 && (
+                <button
+                  type="button"
+                  onClick={onRemove(i)}
+                  title="Remove stage"
+                  style={{
+                    marginLeft: 4,
+                    color: "var(--text-4)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  <IconX size={10} />
+                </button>
+              )}
+            </div>
+          </Fragment>
+        );
+      })}
       {insertAt === stages.length && <DropIndicator />}
-    </div>
-  );
-}
-
-function DraggableStage({
-  name,
-  removable,
-  dimmed,
-  onDragStart,
-  onDragEnd,
-  onRemove,
-}: {
-  name: string;
-  removable: boolean;
-  dimmed: boolean;
-  onDragStart: (e: React.DragEvent) => void;
-  onDragEnd: () => void;
-  onRemove: () => void;
-}) {
-  return (
-    <div
-      draggable
-      data-caffeine-stage="true"
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      className={`group flex cursor-grab items-center gap-1.5 rounded border px-2 py-1 text-xs transition ${
-        dimmed
-          ? "border-zinc-800 bg-zinc-900/40 text-zinc-600"
-          : "border-zinc-700 bg-zinc-900 text-zinc-200 hover:border-zinc-600"
-      }`}
-    >
-      <span className="select-none text-zinc-600">⋮⋮</span>
-      <span>{name}</span>
-      {removable && (
-        <button
-          type="button"
-          onClick={onRemove}
-          title="Remove stage"
-          className="ml-1 text-zinc-600 opacity-0 transition group-hover:opacity-100 hover:text-red-400"
-        >
-          ✕
-        </button>
-      )}
     </div>
   );
 }
@@ -767,224 +776,358 @@ function DropIndicator() {
   return (
     <div
       aria-hidden
-      className="h-7 w-0.5 rounded-sm bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]"
+      style={{
+        height: 32,
+        width: 2,
+        borderRadius: 1,
+        background: "var(--emerald)",
+        boxShadow: "0 0 8px rgba(16,185,129,0.6)",
+      }}
     />
   );
 }
 
-// ---------------------------------------------------------------------------
-// Lane / Node / Decider primitives (shared)
-// ---------------------------------------------------------------------------
-
-function Lane({
-  title,
-  subtitle,
-  children,
+function PipelineRaw({
+  value,
+  onChange,
 }: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
+  value: string;
+  onChange: (v: string) => void;
 }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
-      <div className="mb-3 flex items-baseline gap-2">
-        <span className="font-mono text-xs text-zinc-300">{title}</span>
-        {subtitle && (
-          <span className="text-[11px] text-zinc-500">— {subtitle}</span>
-        )}
-      </div>
-      {children}
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        background: "#0a0a0d",
+        minHeight: 0,
+        overflow: "auto",
+      }}
+    >
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        className="mono"
+        style={{
+          flex: 1,
+          padding: "16px 20px",
+          border: "none",
+          outline: "none",
+          background: "transparent",
+          color: "var(--text)",
+          fontSize: 12.5,
+          lineHeight: 1.6,
+          resize: "none",
+        }}
+        placeholder={`---\nper_task:\n  - reviewer\non_backlog_complete:\n  - run: pnpm test\ndecider:\n  max_iterations: 1\n---\n\n# Pipeline rationale here…`}
+      />
     </div>
   );
 }
 
-type NodeKind = "stage" | "command" | "decider" | "terminal" | "loop";
+function EmptyPipeline() {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "grid",
+        placeItems: "center",
+        padding: "0 24px",
+        textAlign: "center",
+      }}
+    >
+      <div>
+        <div style={{ color: "var(--text-2)", fontSize: 13, marginBottom: 6 }}>
+          No pipeline.md in this project.
+        </div>
+        <div className="mono" style={{ color: "var(--text-4)", fontSize: 11 }}>
+          Drop a <span style={{ color: "var(--text-2)" }}>pipeline.md</span> at
+          the repo root to enable pipeline mode.
+        </div>
+      </div>
+    </div>
+  );
+}
 
-function Node({
-  label,
-  kind,
-  active,
-  tone,
-}: {
-  label: string;
-  kind: NodeKind;
-  active: boolean;
-  tone?: "ok" | "warn" | "bad";
-}) {
-  const isCmd = kind === "command";
-  const isTerminal = kind === "terminal" || kind === "loop";
+export function Pipeline() {
+  const live = useStore((s) => s.currentPipeline);
+  const status = useStore((s) => s.status);
+  const currentStage = useStore((s) => s.currentStage);
+  const currentIteration = useStore((s) => s.currentIteration);
+  const lastDecision = useStore((s) => s.lastDecision);
+  const taskIndex = useStore((s) => s.currentTaskIndex);
+  const taskTotal = useStore((s) => s.currentTaskTotal);
 
-  let border = "border-zinc-700";
-  let bg = "bg-zinc-900";
-  let text = "text-zinc-200";
-  let shadow = "";
+  const [diskPipeline, setDiskPipeline] = useState<PipelineWireShape | null>(
+    null,
+  );
+  const [loaded, setLoaded] = useState(false);
+  const [mode, setMode] = useState<Mode>("read");
+  const [draft, setDraft] = useState<PipelineWireShape | null>(null);
+  const [rawDraft, setRawDraft] = useState<string>("");
+  const [rawDirty, setRawDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  if (active) {
-    border = "border-emerald-500";
-    bg = "bg-emerald-950/40";
-    text = "text-emerald-200";
-    shadow = "shadow-[0_0_16px_-4px_rgba(16,185,129,0.6)]";
-  } else if (tone === "ok") {
-    border = "border-emerald-700";
-    text = "text-emerald-300";
-  } else if (tone === "warn") {
-    border = "border-amber-600";
-    text = "text-amber-300";
-  } else if (tone === "bad") {
-    border = "border-red-600";
-    text = "text-red-300";
+  const sessionRunning = status === "running" || status === "paused";
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.caffeine.pipeline.read().then((p) => {
+      if (cancelled) return;
+      setDiskPipeline(p as PipelineWireShape | null);
+      setLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const pipeline = live ?? diskPipeline;
+
+  const enterEdit = () => {
+    if (!pipeline) return;
+    setDraft({
+      per_task: [...pipeline.per_task],
+      on_backlog_complete: pipeline.on_backlog_complete.map((s) => ({ ...s })),
+      decider: { ...pipeline.decider },
+    });
+    setMode("edit");
+    setSaveError(null);
+  };
+
+  const enterRaw = async () => {
+    setSaveError(null);
+    const raw = (await window.caffeine.pipeline.readRaw()) as string | null;
+    setRawDraft(raw ?? "");
+    setRawDirty(false);
+    setMode("raw");
+  };
+
+  const enterRead = () => {
+    setDraft(null);
+    setRawDraft("");
+    setRawDirty(false);
+    setMode("read");
+    setSaveError(null);
+  };
+
+  const saveEdit = async () => {
+    if (!draft) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = (await window.caffeine.pipeline.write(draft)) as
+        | { ok: true }
+        | { ok: false; reason: string };
+      if (!result?.ok) {
+        setSaveError(result?.reason ?? "unknown error");
+        return;
+      }
+      setDiskPipeline(draft);
+      enterRead();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveRaw = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = (await window.caffeine.pipeline.writeRaw(rawDraft)) as
+        | { ok: true }
+        | { ok: false; reason: string };
+      if (!result?.ok) {
+        setSaveError(result?.reason ?? "unknown error");
+        return;
+      }
+      const reparsed = (await window.caffeine.pipeline.read()) as
+        | PipelineWireShape
+        | null;
+      setDiskPipeline(reparsed);
+      enterRead();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!loaded) {
+    return (
+      <div
+        style={{
+          flex: 1,
+          display: "grid",
+          placeItems: "center",
+          fontSize: 12,
+          color: "var(--text-3)",
+        }}
+      >
+        Loading pipeline…
+      </div>
+    );
   }
+
+  const sub =
+    pipeline && currentIteration > 0
+      ? `iter ${currentIteration}/${pipeline.decider.max_iterations} · task ${taskIndex >= 1 ? taskIndex : "—"}/${taskTotal || "—"}`
+      : pipeline
+        ? `${pipeline.per_task.length} stages · ${pipeline.on_backlog_complete.length} commands`
+        : "no pipeline.md";
 
   return (
     <div
-      className={`rounded ${isTerminal ? "px-3 py-1" : "px-3 py-1.5"} ${border} ${bg} ${text} ${shadow} border ${
-        isCmd ? "font-mono text-[11px]" : "text-xs"
-      } whitespace-nowrap transition`}
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--bg)",
+        minHeight: 0,
+      }}
     >
-      {label}
-    </div>
-  );
-}
-
-function ArrowRight() {
-  return (
-    <div className="flex items-center text-zinc-600">
-      <div className="h-px w-4 bg-zinc-700" />
-      <div className="-ml-0.5 text-[10px] leading-none">▸</div>
-    </div>
-  );
-}
-
-function DownArrow({ label }: { label?: string }) {
-  return (
-    <div className="my-1 flex items-center justify-center gap-2 text-[11px] text-zinc-500">
-      <div className="flex flex-col items-center text-zinc-600">
-        <div className="h-5 w-px bg-zinc-700" />
-        <div className="-mt-1 text-[10px] leading-none">▾</div>
-      </div>
-      {label && <span>{label}</span>}
-    </div>
-  );
-}
-
-function DeciderNode({
-  decision,
-  running,
-}: {
-  decision: Decision;
-  running: boolean;
-}) {
-  return (
-    <div className="flex items-start gap-6">
-      <Node
-        label="decider (subagent)"
-        kind="decider"
-        active={running && decision === null}
+      <StatusBar
+        tabLabel="pipeline.md"
+        sub={sub}
+        right={
+          <>
+            <SegToggle
+              value={mode}
+              onChange={(m) => {
+                if (m === "raw") void enterRaw();
+                else if (m === "edit") {
+                  if (!sessionRunning && pipeline) enterEdit();
+                } else enterRead();
+              }}
+              options={["read", "edit", "raw"]}
+            />
+          </>
+        }
       />
-      <div className="flex flex-col gap-2 pt-0.5">
-        <div className="flex items-center gap-2">
-          <DeciderEdge label="done" />
-          <Node
-            label="✓ done"
-            kind="terminal"
-            active={false}
-            tone={decision === "done" ? "ok" : undefined}
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <DeciderEdge label="loop" tone="warn" />
-          <Node
-            label="↻ loop  →  appends [LOOP-N] to BACKLOG, restarts"
-            kind="loop"
-            active={false}
-            tone={decision === "loop" ? "warn" : undefined}
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <DeciderEdge label="halt" tone="bad" />
-          <Node
-            label="⏹ halt (max iterations)"
-            kind="terminal"
-            active={false}
-            tone={decision === "halt" ? "bad" : undefined}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeciderEdge({
-  label,
-  tone,
-}: {
-  label: string;
-  tone?: "warn" | "bad";
-}) {
-  const color =
-    tone === "warn"
-      ? "text-amber-400 border-amber-700"
-      : tone === "bad"
-        ? "text-red-400 border-red-800"
-        : "text-emerald-400 border-emerald-800";
-  return (
-    <div className={`flex items-center gap-1 ${color}`}>
-      <div className="h-px w-4 bg-current opacity-60" />
-      <span className="text-[10px] uppercase tracking-wide">{label}</span>
-      <div className="-ml-0.5 text-[10px] leading-none">▸</div>
-    </div>
-  );
-}
-
-/**
- * The back-edge from decider → top of graph. Rendered as an absolutely
- * positioned SVG on the right margin of the graph so it visually
- * connects the decider's loop output back to the per_task lane.
- */
-function CyclicLoopArc({ highlighted }: { highlighted: boolean }) {
-  const stroke = highlighted ? "#f59e0b" : "#52525b";
-  const strokeOpacity = highlighted ? 1 : 0.5;
-
-  return (
-    <svg
-      aria-hidden
-      className="pointer-events-none absolute -right-12 top-0 h-full w-12 text-amber-400"
-      viewBox="0 0 48 100"
-      preserveAspectRatio="none"
-    >
-      <defs>
-        <marker
-          id="arrowhead-loop"
-          markerWidth="6"
-          markerHeight="6"
-          refX="3"
-          refY="3"
-          orient="auto"
+      {saveError && (
+        <div
+          style={{
+            padding: "8px 16px",
+            borderBottom: "1px solid rgba(239,68,68,0.4)",
+            background: "rgba(239,68,68,0.08)",
+            color: "#fca5a5",
+            fontSize: 11.5,
+            fontFamily: "var(--mono)",
+          }}
         >
-          <path d="M 0 0 L 6 3 L 0 6 z" fill={stroke} fillOpacity={strokeOpacity} />
-        </marker>
-      </defs>
-      <path
-        d="M 4 92 Q 44 50 4 8"
-        fill="none"
-        stroke={stroke}
-        strokeOpacity={strokeOpacity}
-        strokeWidth="1.5"
-        strokeDasharray={highlighted ? "0" : "4 3"}
-        markerEnd="url(#arrowhead-loop)"
-      />
-      <text
-        x="24"
-        y="50"
-        fill={stroke}
-        fillOpacity={strokeOpacity}
-        fontSize="9"
-        fontFamily="ui-monospace, monospace"
-        textAnchor="middle"
-        transform="rotate(-90 24 50)"
-      >
-        loop
-      </text>
-    </svg>
+          save failed: {saveError}
+        </div>
+      )}
+      {mode === "edit" && draft && (
+        <Palette currentStages={draft.per_task} />
+      )}
+      {mode === "raw" ? (
+        <PipelineRaw
+          value={rawDraft}
+          onChange={(v) => {
+            setRawDraft(v);
+            setRawDirty(true);
+          }}
+        />
+      ) : !pipeline ? (
+        <EmptyPipeline />
+      ) : mode === "edit" && draft ? (
+        <div
+          style={{
+            flex: 1,
+            overflow: "auto",
+            padding: "20px 24px 24px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 20,
+          }}
+        >
+          <Lane
+            kind="per_task (editing)"
+            count={`${draft.per_task.length} stages · drag to reorder, X to remove`}
+            accent="var(--emerald)"
+            headerRight={
+              <span
+                className="mono"
+                style={{ fontSize: 10, color: "var(--text-3)" }}
+              >
+                drop palette items in the lane to add
+              </span>
+            }
+          >
+            <EditableLane
+              stages={draft.per_task}
+              onChange={(stages) =>
+                setDraft((d) => (d ? { ...d, per_task: stages } : d))
+              }
+            />
+          </Lane>
+          <Lane
+            kind="on_backlog_complete"
+            count={`${draft.on_backlog_complete.length} commands · raw-mode to edit`}
+            accent="var(--violet)"
+          >
+            {draft.on_backlog_complete.map((step, i) => (
+              <Fragment key={i}>
+                <CmdChip cmd={step.run} />
+                {i < draft.on_backlog_complete.length - 1 && <Arrow />}
+              </Fragment>
+            ))}
+          </Lane>
+        </div>
+      ) : (
+        <div style={{ flex: 1, overflow: "auto" }}>
+          <CanonicalDCG
+            pipeline={pipeline}
+            activeStage={currentStage}
+            iteration={currentIteration}
+            decision={lastDecision}
+          />
+        </div>
+      )}
+      {(mode === "edit" || mode === "raw") && (
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            padding: "10px 16px",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-2)",
+          }}
+        >
+          <button
+            type="button"
+            onClick={enterRead}
+            disabled={saving}
+            className="mono"
+            style={{
+              padding: "5px 12px",
+              fontSize: 11.5,
+              border: "1px solid var(--border)",
+              color: "var(--text-2)",
+              opacity: saving ? 0.5 : 1,
+            }}
+          >
+            discard
+          </button>
+          <button
+            type="button"
+            onClick={mode === "raw" ? saveRaw : saveEdit}
+            disabled={saving || (mode === "raw" && !rawDirty)}
+            className="mono"
+            style={{
+              padding: "5px 12px",
+              fontSize: 11.5,
+              border: "1px solid var(--emerald)",
+              background: "rgba(16,185,129,0.08)",
+              color: "var(--emerald-300)",
+              opacity: saving || (mode === "raw" && !rawDirty) ? 0.5 : 1,
+            }}
+          >
+            <IconCheck size={10} /> {saving ? "saving…" : "save"}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
