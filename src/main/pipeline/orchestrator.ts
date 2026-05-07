@@ -151,15 +151,25 @@ export async function runPipeline(
       //    to read STATE.md and follow the protocol, but the orchestrator
       //    asserts authoritatively here so the agent doesn't drift into
       //    running stages on un-implemented work.
+      const acBlock = item.acceptanceCriteria.length > 0
+        ? `\n\nAcceptance criteria for this task (the contract — every AC must be observably satisfied before close):\n` +
+            item.acceptanceCriteria
+              .map(
+                (ac, idx) =>
+                  `  ${idx + 1}. [${ac.checked ? "x" : " "}] AC: ${ac.text}`,
+              )
+              .join("\n")
+        : `\n\nThis task has no acceptance criteria. Author 2-5 observable criteria as indented "- [ ] AC: ..." rows under the task in BACKLOG.md before you implement, OR explain in STATE.md why ACs aren't applicable. Skipping ACs means the critic has nothing to verify against and the loop becomes theatre.`;
       bus.push(
-        `Pipeline iteration ${iteration}, task ${position}/${total}: "${item.text}".\n\n` +
+        `Pipeline iteration ${iteration}, task ${position}/${total}: "${item.text}".${acBlock}\n\n` +
           `Step 1 — IMPLEMENT this task.\n` +
           `- Read STATE.md if you need context from prior tasks.\n` +
-          `- Plan subtasks under "## Current Task" in STATE.md if non-trivial.\n` +
-          `- Make the actual code changes that satisfy the task description.\n` +
+          `- Plan subtasks under "## Current Task" in STATE.md if non-trivial. The plan must reference each AC and the work that proves it.\n` +
+          `- Make the actual code changes that satisfy the task description AND every acceptance criterion.\n` +
+          `- As each AC becomes observably satisfied, tick its checkbox in BACKLOG.md. AC ticks are evidence — do not tick an AC you have not shipped.\n` +
           `- Run the verification commands listed in caffeine.config.json after meaningful edits. Do not proceed past a red gate.\n\n` +
           `Step 2 — STAGE your changes with \`git add -A\` so the per_task subagents can read the staged diff.\n\n` +
-          `Do NOT tick the BACKLOG.md checkbox yet. The per_task stages run on your work next, ` +
+          `Do NOT tick the top-level BACKLOG.md checkbox yet. The per_task stages run on your work next, ` +
           `and a closing prompt will instruct you to tick the box once they pass.`,
       );
 
@@ -178,8 +188,10 @@ export async function runPipeline(
         });
         bus.push(
           `Run the ${stageName} stage on the just-implemented task "${item.text}". ` +
-            `Invoke the ${stageName} subagent via the Agent tool, pass it the staged diff, ` +
-            `and ensure its findings reach STATE.md before you proceed.`,
+            `Invoke the ${stageName} subagent via the Agent tool. Tell it the verbatim task text ` +
+            `("${item.text}") so stages like the critic can locate the task and its acceptance ` +
+            `criteria in BACKLOG.md. Pass it the staged diff context, and ensure its findings ` +
+            `reach STATE.md before you proceed.`,
         );
         // We deliberately do NOT emit `stage-completed` here.
         // The orchestrator queues the prompt onto the bus but has
@@ -192,11 +204,15 @@ export async function runPipeline(
       // c. Closing beat. Without this the agent might leave the
       //    checkbox unchecked even after stages pass, which keeps the
       //    Stop hook blocking forever.
+      const acCloseGate = item.acceptanceCriteria.length > 0
+        ? `0. Confirm every AC under this task is ticked in BACKLOG.md. If any AC is unchecked because the work is incomplete, do NOT tick the parent — go back and finish (or move the unmet AC to a follow-up task with an explanation in Lessons Learned). The critic stage (if present) will have flagged unmet criteria in STATE.md under \`## Acceptance Findings\` — read that section and address \`partial\` / \`missed\` verdicts before closing.\n`
+        : "";
       bus.push(
         `All ${pipeline.per_task.length} per_task stage(s) have completed for "${item.text}".\n\n` +
           `If any stage flagged real issues in STATE.md that you have not yet addressed, ` +
           `fix them now and re-run the relevant stage(s). Otherwise:\n` +
-          `1. Tick the checkbox in BACKLOG.md for this task.\n` +
+          acCloseGate +
+          `1. Tick the top-level checkbox in BACKLOG.md for this task.\n` +
           `2. Append a 1-2 line note to STATE.md under "## Lessons Learned".\n` +
           `3. The orchestrator will queue the next task or end-of-iteration commands shortly.`,
       );

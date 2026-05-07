@@ -267,7 +267,13 @@ async function readBacklogText(repo: string): Promise<string> {
 }
 
 function countOpenItems(backlog: string): number {
-  const matches = backlog.match(/^\s*[-*]\s+\[\s\]\s+/gm);
+  // Top-level only — no leading whitespace. Indented `- [ ] AC: ...`
+  // rows are acceptance criteria belonging to a task, not standalone
+  // backlog tasks; counting them would let the Stop hook keep the
+  // agent grinding until every individual AC checkbox is ticked,
+  // which double-counts the work and breaks the closing protocol
+  // (parent tick = all ACs already ticked).
+  const matches = backlog.match(/^[-*]\s+\[\s\]\s+/gm);
   return matches?.length ?? 0;
 }
 

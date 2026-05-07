@@ -28,26 +28,65 @@ export async function writeBacklog(
   await writeFile(join(repoPath, FILENAME), content, "utf8");
 }
 
-export type BacklogItem = {
-  /** Index into the full markdown line array — useful for stable keys & toggling. */
+export type AcceptanceCriterion = {
   lineIndex: number;
   text: string;
   checked: boolean;
 };
 
-/** Parse a BACKLOG.md into the structured task list shown in the UI. */
+export type BacklogItem = {
+  /** Index into the full markdown line array — useful for stable keys & toggling. */
+  lineIndex: number;
+  text: string;
+  checked: boolean;
+  /**
+   * Indented `- [ ] AC: <criterion>` rows that follow this task. Used by
+   * the implementer to plan against, by the critic to verify, and by the
+   * decider to author targeted [LOOP-N] tasks. Nested checkboxes WITHOUT
+   * the `AC:` prefix are decorative and ignored.
+   */
+  acceptanceCriteria: AcceptanceCriterion[];
+};
+
+const TOP_LEVEL_TASK_RE = /^[-*]\s+\[([ xX])\]\s+(.*)$/;
+const NESTED_AC_RE = /^\s+[-*]\s+\[([ xX])\]\s+AC:\s*(.*)$/;
+
+/**
+ * Parse a BACKLOG.md into the structured task list shown in the UI.
+ *
+ * Top-level checkboxes (zero leading whitespace) are tasks. Indented
+ * `- [ ] AC: <criterion>` rows under a task become `acceptanceCriteria`
+ * on that task. Other indented checkboxes are decorative and dropped.
+ *
+ * Returning ACs as a sub-collection (instead of as additional top-level
+ * items) is what keeps the Stop hook and orchestrator drain-check from
+ * treating every criterion as a standalone backlog task.
+ */
 export function parseBacklog(markdown: string): BacklogItem[] {
   const lines = markdown.split(/\r?\n/);
   const items: BacklogItem[] = [];
-  const re = /^\s*[-*]\s+\[([ xX])\]\s+(.*)$/;
+  let current: BacklogItem | null = null;
   lines.forEach((line, i) => {
-    const m = line.match(re);
-    if (!m) return;
-    items.push({
-      lineIndex: i,
-      checked: m[1].toLowerCase() === "x",
-      text: m[2],
-    });
+    const top = line.match(TOP_LEVEL_TASK_RE);
+    if (top) {
+      current = {
+        lineIndex: i,
+        checked: top[1].toLowerCase() === "x",
+        text: top[2],
+        acceptanceCriteria: [],
+      };
+      items.push(current);
+      return;
+    }
+    if (!current) return;
+    const ac = line.match(NESTED_AC_RE);
+    if (ac) {
+      current.acceptanceCriteria.push({
+        lineIndex: i,
+        text: ac[2],
+        checked: ac[1].toLowerCase() === "x",
+      });
+    }
   });
   return items;
 }

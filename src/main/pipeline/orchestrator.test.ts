@@ -198,7 +198,7 @@ describe("runPipeline", () => {
     expect(pushed[3]).toMatch(/Run the tester stage/);
 
     // Then the closing beat that ticks the checkbox.
-    expect(pushed[4]).toMatch(/Tick the checkbox/i);
+    expect(pushed[4]).toMatch(/Tick the (top-level )?checkbox/i);
 
     // The implementer beat must reference staging the diff so the
     // stages have something to inspect.

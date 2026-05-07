@@ -165,6 +165,44 @@ describe("Stop hook (v1 regression)", () => {
 
     expect(result).toEqual({});
   });
+
+  it("does not count indented `- [ ] AC:` rows as open backlog tasks", async () => {
+    // Indented AC checkboxes are acceptance criteria belonging to a
+    // (checked) task — they're task details, not standalone work
+    // items. Counting them would block the stop forever even when
+    // every top-level task is done, defeating the close-protocol.
+    vi.mocked(readFile).mockResolvedValueOnce(
+      [
+        "# Backlog",
+        "",
+        "- [x] Build feature",
+        "  - [ ] AC: this AC was left unchecked but the task is done",
+        "  - [x] AC: this one is checked",
+      ].join("\n"),
+    );
+
+    const result = await invokeStop();
+
+    expect(result).toEqual({});
+  });
+
+  it("counts only the top-level unchecked task, not its unchecked ACs", async () => {
+    vi.mocked(readFile).mockResolvedValueOnce(
+      [
+        "- [ ] One task with three ACs",
+        "  - [ ] AC: a",
+        "  - [ ] AC: b",
+        "  - [ ] AC: c",
+      ].join("\n"),
+    );
+
+    const result = await invokeStop();
+
+    expect(result).toMatchObject({ decision: "block" });
+    // Reason text says "1 unchecked task" — not 4. If this fails with
+    // /4 unchecked/, the count regex is matching the indented ACs too.
+    expect((result as { reason: string }).reason).toMatch(/1 unchecked/);
+  });
 });
 
 describe("Stop hook (pipeline mode)", () => {

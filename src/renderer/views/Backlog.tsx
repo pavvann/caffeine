@@ -4,24 +4,53 @@ import { SegToggle, StatusBar } from "../components/StatusBar";
 import { IconCheck } from "../components/Icons";
 
 type Mode = "read" | "raw";
-type Item = { lineIndex: number; text: string; checked: boolean; loop?: string };
+type Item = {
+  lineIndex: number;
+  text: string;
+  checked: boolean;
+  loop?: string;
+  /** True when this row is an indented `- [ ] AC: ...` criterion under a task. */
+  ac?: boolean;
+};
 
-const TASK_LINE_RE = /^\s*[-*]\s+\[([ xX])\]\s+(.*)$/;
+const TOP_LEVEL_TASK_RE = /^[-*]\s+\[([ xX])\]\s+(.*)$/;
+const NESTED_AC_RE = /^\s+[-*]\s+\[([ xX])\]\s+AC:\s*(.*)$/;
 const LOOP_TAG_RE = /\[(LOOP-\d+)\]\s*/;
 
 function parse(md: string): Item[] {
+  // Mirrors src/main/repo/backlog.ts::parseBacklog so the renderer's
+  // task rail and the orchestrator agree about what counts as a task vs
+  // an acceptance criterion. Keeping the implementations in sync is
+  // load-bearing — the rail's task numbering would diverge from the
+  // backlog parser otherwise.
   const items: Item[] = [];
   md.split(/\r?\n/).forEach((line, i) => {
-    const m = line.match(TASK_LINE_RE);
-    if (!m) return;
-    let text = m[2];
-    let loop: string | undefined;
-    const loopMatch = text.match(LOOP_TAG_RE);
-    if (loopMatch) {
-      loop = loopMatch[1];
-      text = text.replace(LOOP_TAG_RE, "");
+    const top = line.match(TOP_LEVEL_TASK_RE);
+    if (top) {
+      let text = top[2];
+      let loop: string | undefined;
+      const loopMatch = text.match(LOOP_TAG_RE);
+      if (loopMatch) {
+        loop = loopMatch[1];
+        text = text.replace(LOOP_TAG_RE, "");
+      }
+      items.push({
+        lineIndex: i,
+        text,
+        checked: top[1].toLowerCase() === "x",
+        loop,
+      });
+      return;
     }
-    items.push({ lineIndex: i, text, checked: m[1].toLowerCase() === "x", loop });
+    const ac = line.match(NESTED_AC_RE);
+    if (ac) {
+      items.push({
+        lineIndex: i,
+        text: ac[2],
+        checked: ac[1].toLowerCase() === "x",
+        ac: true,
+      });
+    }
   });
   return items;
 }
@@ -79,7 +108,13 @@ function TaskRail({
   activeIndex: number;
   onToggle: (lineIndex: number) => void;
 }) {
-  const done = items.filter((i) => i.checked).length;
+  // Counters and the segment row reflect TOP-LEVEL tasks only — ACs are
+  // task details, not standalone work items, and conflating them inflates
+  // "X of Y done" so a half-finished task with five green ACs reads as
+  // mostly-shipped when it isn't.
+  const topLevel = items.filter((i) => !i.ac);
+  const done = topLevel.filter((i) => i.checked).length;
+  let topLevelCounter = 0;
 
   return (
     <div
@@ -119,7 +154,7 @@ function TaskRail({
             {done}
           </span>
           <span className="mono" style={{ fontSize: 13, color: "var(--text-3)" }}>
-            / {items.length}
+            / {topLevel.length}
           </span>
           <span
             style={{ fontSize: 11, color: "var(--text-3)", marginLeft: 6 }}
@@ -127,9 +162,9 @@ function TaskRail({
             complete
           </span>
         </div>
-        {items.length > 0 && (
+        {topLevel.length > 0 && (
           <div style={{ marginTop: 10, display: "flex", gap: 3 }}>
-            {items.map((t, i) => {
+            {topLevel.map((t, i) => {
               const isActive = i === activeIndex;
               return (
                 <div
@@ -163,8 +198,47 @@ function TaskRail({
             No tasks parsed. Add lines like “- [ ] Do the thing”.
           </div>
         ) : (
-          items.map((t, i) => {
-            const isActive = i === activeIndex;
+          items.map((t) => {
+            if (t.ac) {
+              return (
+                <label
+                  key={t.lineIndex}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    padding: "3px 9px 3px 36px",
+                    alignItems: "flex-start",
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={t.checked}
+                    onChange={() => onToggle(t.lineIndex)}
+                    style={{ display: "none" }}
+                  />
+                  <Checkbox checked={t.checked} />
+                  <div
+                    className="mono"
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: 10.5,
+                      color: t.checked ? "var(--text-4)" : "var(--text-3)",
+                      textDecoration: t.checked ? "line-through" : "none",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    <span style={{ color: "var(--text-4)", marginRight: 4 }}>
+                      AC
+                    </span>
+                    {t.text}
+                  </div>
+                </label>
+              );
+            }
+            const idx = topLevelCounter++;
+            const isActive = idx === activeIndex;
             return (
               <label
                 key={t.lineIndex}
@@ -190,7 +264,7 @@ function TaskRail({
                 <Checkbox checked={t.checked} active={isActive} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="mono" style={{ fontSize: 10, color: "var(--text-4)" }}>
-                    #{String(i + 1).padStart(2, "0")}
+                    #{String(idx + 1).padStart(2, "0")}
                   </div>
                   <div
                     style={{
@@ -306,8 +380,9 @@ export function Backlog() {
   }
 
   const items = parse(text);
-  const done = items.filter((i) => i.checked).length;
-  const activeIndex = items.findIndex((i) => !i.checked);
+  const topLevel = items.filter((i) => !i.ac);
+  const done = topLevel.filter((i) => i.checked).length;
+  const activeIndex = topLevel.findIndex((i) => !i.checked);
 
   return (
     <div
@@ -322,8 +397,8 @@ export function Backlog() {
       <StatusBar
         tabLabel="BACKLOG.md"
         sub={
-          items.length > 0
-            ? `${done} of ${items.length} done`
+          topLevel.length > 0
+            ? `${done} of ${topLevel.length} done`
             : "no tasks yet"
         }
         right={<SegToggle value={mode} onChange={setMode} options={["read", "raw"]} />}

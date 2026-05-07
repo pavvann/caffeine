@@ -1,10 +1,10 @@
-// Unit tests for `appendLoopTasks`. Real fs in a tmpdir — no mocks.
+// Unit tests for `appendLoopTasks` and `parseBacklog`. Real fs in a tmpdir — no mocks.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { appendLoopTasks } from "./backlog";
+import { appendLoopTasks, parseBacklog } from "./backlog";
 
 let dir: string;
 
@@ -104,5 +104,102 @@ describe("appendLoopTasks", () => {
     const out = await read();
     const matches = out.match(/\[LOOP-1\] `pnpm test` exited 1/g);
     expect(matches).toHaveLength(1);
+  });
+});
+
+describe("parseBacklog", () => {
+  it("returns one item per top-level checkbox; ignores indented sub-bullets without AC: prefix", () => {
+    const md = [
+      "# Backlog",
+      "",
+      "- [ ] First task",
+      "  - [ ] decorative sub-bullet",
+      "  - some plain bullet",
+      "- [x] Second task",
+    ].join("\n");
+
+    const items = parseBacklog(md);
+    expect(items).toHaveLength(2);
+    expect(items[0].text).toBe("First task");
+    expect(items[0].checked).toBe(false);
+    expect(items[0].acceptanceCriteria).toEqual([]);
+    expect(items[1].text).toBe("Second task");
+    expect(items[1].checked).toBe(true);
+  });
+
+  it("attaches indented `- [ ] AC: ...` rows as acceptanceCriteria of the preceding task", () => {
+    const md = [
+      "- [ ] Build OAuth login",
+      "  - [ ] AC: User completes Google sign-in end-to-end",
+      "  - [ ] AC: Failed auth shows error toast",
+      "  - [x] AC: Session persists across app restart",
+      "- [ ] Add password reset",
+      "  - [ ] AC: Reset email contains a single-use token",
+    ].join("\n");
+
+    const items = parseBacklog(md);
+    expect(items).toHaveLength(2);
+    expect(items[0].acceptanceCriteria).toEqual([
+      {
+        lineIndex: 1,
+        text: "User completes Google sign-in end-to-end",
+        checked: false,
+      },
+      {
+        lineIndex: 2,
+        text: "Failed auth shows error toast",
+        checked: false,
+      },
+      {
+        lineIndex: 3,
+        text: "Session persists across app restart",
+        checked: true,
+      },
+    ]);
+    expect(items[1].acceptanceCriteria).toEqual([
+      {
+        lineIndex: 5,
+        text: "Reset email contains a single-use token",
+        checked: false,
+      },
+    ]);
+  });
+
+  it("does not attach AC rows that appear before any task", () => {
+    // Stray indented AC at the top of the file should be dropped, not
+    // attached to a phantom task or promoted to a top-level item.
+    const md = [
+      "  - [ ] AC: orphan criterion",
+      "- [ ] Real task",
+    ].join("\n");
+
+    const items = parseBacklog(md);
+    expect(items).toHaveLength(1);
+    expect(items[0].text).toBe("Real task");
+    expect(items[0].acceptanceCriteria).toEqual([]);
+  });
+
+  it("treats indented checkboxes WITHOUT the `AC:` prefix as decorative (dropped)", () => {
+    const md = [
+      "- [ ] Task with mixed nesting",
+      "  - [ ] decorative subtask without AC prefix",
+      "  - [ ] AC: real criterion",
+    ].join("\n");
+
+    const items = parseBacklog(md);
+    expect(items).toHaveLength(1);
+    expect(items[0].acceptanceCriteria).toHaveLength(1);
+    expect(items[0].acceptanceCriteria[0].text).toBe("real criterion");
+  });
+
+  it("recognizes `*` as well as `-` for both task and AC bullets", () => {
+    const md = [
+      "* [ ] Star task",
+      "  * [ ] AC: star criterion",
+    ].join("\n");
+
+    const items = parseBacklog(md);
+    expect(items).toHaveLength(1);
+    expect(items[0].acceptanceCriteria).toHaveLength(1);
   });
 });

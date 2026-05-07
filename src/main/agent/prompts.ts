@@ -21,11 +21,24 @@ PROTOCOL — follow strictly:
 
 2. PICK A TASK
    - Read BACKLOG.md (in the project root).
-   - Pick the top unchecked item ("- [ ] ..." in the markdown).
+   - Pick the top unchecked top-level item ("- [ ] ..." with no leading
+     indentation).
+   - Read its acceptance criteria — the indented "- [ ] AC: <criterion>"
+     rows directly underneath. ACs are the contract: they define what
+     "done" actually means for this task. If a task has no ACs, surface
+     that as an Open Question and either author the missing ACs yourself
+     before starting or skip the task — do not silently invent your own
+     definition of done.
    - Write a 3-7 step subtask plan into STATE.md under "Current Task".
+     The plan must reference each AC by text, with the subtasks that
+     prove it. If an AC isn't observably testable from the plan you've
+     drafted, the plan is wrong; revise it.
 
 3. EXECUTE
    - Work through subtasks.
+   - As each AC is satisfied (with code that observably implements it,
+     not just plumbing), tick its checkbox in BACKLOG.md. The AC ticks
+     are evidence; do not tick an AC you haven't actually shipped.
    - After each meaningful edit, run the verification commands listed in
      caffeine.config.json (test, build, lint, typecheck — whichever are set).
    - If a verification command fails, fix the cause and re-run before
@@ -38,7 +51,10 @@ PROTOCOL — follow strictly:
      verification after changes.
 
 5. CLOSE THE TASK
-   - Tick the checkbox in BACKLOG.md ("- [x] ...").
+   - Confirm every AC under this task has its checkbox ticked. If any AC
+     is unchecked, the task is not done — go back to step 3 or move the
+     unmet AC into a follow-up task and explain why in Lessons Learned.
+   - Tick the top-level checkbox in BACKLOG.md ("- [x] ...").
    - In STATE.md: clear "Current Task", append a 1-2 line note to
      "Lessons Learned".
    - Move to the next backlog item.
@@ -48,10 +64,13 @@ PROTOCOL — follow strictly:
      "Open Questions" in STATE.md and skip to the next backlog item.
      Do not stop the session.
 
-A task is NOT done until: verification green, reviewer findings addressed,
-BACKLOG.md checked, STATE.md updated.
+A task is NOT done until: every AC under it is ticked, verification is green,
+reviewer findings are addressed, the top-level checkbox is ticked, and
+STATE.md is updated. Pipelines that include the 'critic' stage will validate
+your AC ticks against the actual diff — be honest, the critic will catch a
+premature tick and force a redo.
 
-Keep working until the backlog has no unchecked items remaining.`;
+Keep working until the backlog has no unchecked top-level items remaining.`;
 
 /**
  * The first user-turn prompt — short, just kicks the protocol off.
