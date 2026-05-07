@@ -64,16 +64,25 @@ A good `BACKLOG.md` looks like this:
 
 ## Phase 0: Safety net
 - [ ] Write `src/main/agent/hooks.test.ts` covering the v1 Stop hook ...
+  - [ ] AC: Test file exists with three behavioral cases (block / allow / pipeline-mode).
+  - [ ] AC: `pnpm test` runs the new file and all three cases pass against the unmodified source.
+  - [ ] AC: A deliberate one-character break in `hooks.ts` causes at least one test to fail.
 
 ## Phase 1: New surface area
 - [ ] Create `src/main/pipeline/types.ts` exporting `Pipeline` type with fields ...
+  - [ ] AC: `import { Pipeline } from "./types"` resolves with the documented field set.
+  - [ ] AC: Typecheck passes; no `any` or `unknown` in the exported shape.
 
 ## Phase 4: Validation
 - [ ] Run `pnpm typecheck`. Must pass.
+  - [ ] AC: `pnpm typecheck` exits 0.
 - [ ] Run `pnpm test`. All tests must pass.
+  - [ ] AC: `pnpm test` exits 0 with no `.skip` or `.todo` introduced this run.
 ```
 
 Tasks are risk-ordered: safety nets first, new files second, load-bearing modifications last. Every task names file paths, function signatures, and test cases. Vagueness becomes wasted hours when you're handing the file to an autonomous agent.
+
+**Acceptance criteria** (the indented `- [ ] AC: ...` rows under each task) are the contract — they define what "done" actually looks like in observable terms. The implementer ticks them as evidence accrues, and the `critic` subagent (in pipeline mode) verifies them against the diff. Without ACs, "tests pass" stops being trustworthy signal because the implementer wrote both the code and the tests; with ACs, the loop has something independent to grade against.
 
 The `/caffeine` skill writes backlogs in this shape automatically.
 
@@ -89,6 +98,7 @@ per_task:
   - reviewer
   - security
   - tester
+  - critic
 on_backlog_complete:
   - run: pnpm typecheck
   - run: pnpm build
@@ -103,30 +113,31 @@ decider:
 [Markdown body — explain why each stage is here. Ignored by the parser, read by humans.]
 ```
 
-### Per-task stages (v0.0.3 ships three)
+### Per-task stages
 
-- `reviewer` — adversarial diff critique. Read-only. Reports to `STATE.md`.
+Bundled stages live as markdown files in `agents/*.md`. Drop your own `agents/<name>.md` in your target repo to add custom stages or override bundled ones — user files win on name conflict.
+
+- `reviewer` — adversarial diff critique focused on code-level issues and semantic mismatches. Read-only. Reports to `STATE.md`.
 - `security` — scans the diff for secrets, injection, missing authz, unsafe deserialization. Bash-enabled so it can run `gitleaks` if available.
-- `tester` — writes or updates tests for the changed code, runs the test suite to confirm.
-
-Custom stages need code (drop a new `AgentDefinition` in `src/main/agent/`, register in `runner.ts`). Coming as a config-only feature in a future release.
+- `tester` — writes or updates tests against the active task's acceptance criteria (not the diff), runs the suite, and produces a coverage report mapping ACs → tests.
+- `critic` — acceptance critic. Reads the original task + its ACs + the staged diff + STATE.md and renders a per-AC verdict (pass / partial / missed / ungrounded) plus any **gaps** (criteria the task implied but didn't enumerate). Place last in `per_task` so it can weigh the other stages' findings. **This is what makes "loop" stop being theatre** — without an independent critic, the implementer writes both the code and the tests, so green tests only mean the implementer agreed with itself.
 
 ### The decider
 
-After the integration commands run, an agentic decider reads `STATE.md`, the staged diff, and the failed commands, then writes a structured JSON decision back to `STATE.md`:
+After the integration commands run, an agentic decider reads `STATE.md` (including the critic's `## Acceptance Findings`), the staged diff, and the failed commands, then writes a structured JSON decision back to `STATE.md`:
 
 ```json
 {
   "decision": "loop",
-  "reason": "5 tests failed in src/auth.test.ts due to a missing fixture; recoverable.",
+  "reason": "Critic flagged 2 partial ACs on the auth task; tests green but the error toast isn't wired.",
   "loop_tasks": [
-    "Add User fixture in src/auth.test.ts:1-10 (id: string, email: string)",
-    "Update beforeEach in src/auth.test.ts:42 to use the new fixture"
+    "Wire the error toast for failed Google auth in src/auth/login.ts:84 — current handler swallows the rejection",
+    "Add an AC under the OAuth task: 'Failed auth shows the existing error toast component'"
   ]
 }
 ```
 
-When it returns `"loop"`, the orchestrator appends those `loop_tasks` to `BACKLOG.md` as new `[LOOP-N]` items and restarts the iteration. Capped by `max_iterations`.
+`done` requires both that the e2e exit code is 0 AND that every critic verdict in this iteration is `"overall": "complete"`. Green tests with `incomplete` acceptance findings means the implementer wrote code that compiles and passes tests but doesn't satisfy what was asked — the decider loops. When the critic supplies per-AC `loop_task` strings, the decider prefers them verbatim (the critic already authored them with full context). Capped by `max_iterations`.
 
 This is the actual differentiator. Devin, Cognition, and Cursor's background agents all promise autonomy, but none of them loop back on integration failure with targeted next-step tasks authored by an agent that read the full failure context. The cycle plus the conditional outputs (`done` / `loop` / `halt`) is what makes this a *Directed Cyclic Graph with conditional edges*, not a DAG.
 

@@ -47,13 +47,14 @@ You are about to produce a `BACKLOG.md` file for Caffeine. A well-structured bac
 ### Hard rules (apply to every task you write)
 
 1. **Every task must be specific.** Concrete file paths, function signatures, test case descriptions. Bad: "add tests for auth." Good: `Write src/auth/login.test.ts with three cases: (a) valid creds → returns session, (b) invalid → throws AuthError, (c) expired token → throws TokenExpired. Mock the user repo via vi.mock('@/repo/users').`
-2. **Risk-ordered phases.** Safety net first, then new files (no risk), then extensions, then load-bearing modifications, then validation. Never invert.
-3. **The first task is ALWAYS a regression test** if the backlog includes modifications to existing code that isn't already covered. Non-negotiable.
-4. **Architecture decisions go in the preamble** so the agent doesn't relitigate them mid-run.
-5. **~30–90 minutes per task.** Bigger → split. Smaller → bundle.
-6. **No half-features.** A task that adds a function adds the test. A task that modifies a function updates the test.
-7. **No filler** ("set up project", "init git" — assume the project is real).
-8. **No vague tasks** ("improve performance", "refactor for clarity") — every task must be concrete and verifiable.
+2. **Every task MUST have 2-5 acceptance criteria** as indented `- [ ] AC: <criterion>` rows directly under it. ACs are observable end-to-end behaviors a critic can verify against the diff — not implementation steps. Bad AC: "use Express middleware." Good AC: "POST /api/login with invalid creds returns 401 and the error toast renders in the UI." If you cannot write 2 observable ACs for a task, the task is too vague and must be split or rewritten. **This is non-negotiable** — Caffeine's `critic` stage uses ACs as the contract; without them, "tests pass" becomes a meaningless signal because the implementer wrote the tests.
+3. **Risk-ordered phases.** Safety net first, then new files (no risk), then extensions, then load-bearing modifications, then validation. Never invert.
+4. **The first task is ALWAYS a regression test** if the backlog includes modifications to existing code that isn't already covered. Non-negotiable.
+5. **Architecture decisions go in the preamble** so the agent doesn't relitigate them mid-run.
+6. **~30–90 minutes per task.** Bigger → split. Smaller → bundle.
+7. **No half-features.** A task that adds a function adds the test. A task that modifies a function updates the test.
+8. **No filler** ("set up project", "init git" — assume the project is real).
+9. **No vague tasks** ("improve performance", "refactor for clarity") — every task must be concrete and verifiable. If you can't write ACs for it, you can't write the task.
 
 ### Interview
 
@@ -109,29 +110,51 @@ After every meaningful edit, run the verification commands in `caffeine.config.j
 ## Phase 0: Safety net
 {Only if Q2 = C or D.}
 
-- [ ] Write `src/<existing-file>.test.ts` covering current behavior of `<function-name>(<args>): <return>`. Cases: (a) {happy path}, (b) {edge}, (c) {edge}. Mock {dependencies}. Confirm tests pass before any modification.
+- [ ] Write `src/<existing-file>.test.ts` covering current behavior of `<function-name>(<args>): <return>`. Mock {dependencies}.
+  - [ ] AC: Test file `src/<existing-file>.test.ts` exists with three cases: (a) {happy path}, (b) {edge}, (c) {edge}.
+  - [ ] AC: `pnpm test` runs the new file and all three cases pass against the unmodified source.
+  - [ ] AC: A deliberate one-character break in the source under test causes at least one of the three tests to fail.
 
 ## Phase 1: New surface area
 
 - [ ] Create `src/<new-feature>/types.ts` exporting type `<Name>` with fields ...
-- [ ] Create `src/<new-feature>/<module>.ts` exporting `<function-name>(<args>): <return>`. Behavior: ... Edge cases: ... Errors: ...
-- [ ] Write `src/<new-feature>/<module>.test.ts` with cases: (a) ..., (b) ..., (c) ...
+  - [ ] AC: `import { <Name> } from "src/<new-feature>/types"` resolves with the documented field set.
+  - [ ] AC: Typecheck passes; no `any` or `unknown` in the exported shape.
+- [ ] Create `src/<new-feature>/<module>.ts` exporting `<function-name>(<args>): <return>`. Behavior: ... Errors: ...
+  - [ ] AC: `<function-name>` returns `<expected>` for the happy-path input documented in the task.
+  - [ ] AC: `<function-name>` throws / returns `<error>` for `<specific bad input>`.
+  - [ ] AC: New module is reachable from at least one call site that is not a test.
+- [ ] Write `src/<new-feature>/<module>.test.ts` with cases for each AC above.
+  - [ ] AC: Each AC from the previous task has a matching `it()` block whose name references the AC.
+  - [ ] AC: `pnpm test` is green.
 
 ## Phase 2: Extensions
 
-- [ ] Extend `src/<existing-file>.ts` with `<new-function>(<args>): <return>`. Existing functions unchanged. Add tests in existing `<existing-file>.test.ts`.
+- [ ] Extend `src/<existing-file>.ts` with `<new-function>(<args>): <return>`. Existing functions unchanged.
+  - [ ] AC: New function exported and called from `<call site>`.
+  - [ ] AC: All pre-existing tests in `<existing-file>.test.ts` still pass.
+  - [ ] AC: New behavior is covered by at least one new test.
 
 ## Phase 3: Load-bearing modifications
 {Only if Q2 = C.}
 
-- [ ] Modify `<existing-function>` in `src/<file>.ts` to {what changes}. Update existing tests in `src/<file>.test.ts`. The Phase 0 regression test (which locked in OLD behavior) is now expected to fail — update with a comment explaining why.
+- [ ] Modify `<existing-function>` in `src/<file>.ts` to {what changes}.
+  - [ ] AC: New behavior is observable from {entry point — UI action / HTTP route / CLI command}.
+  - [ ] AC: Phase 0 regression test is updated with a comment explaining the intentional behavior change.
+  - [ ] AC: Caller migration is complete — `grep` for old usage returns zero hits in `src/`.
 
 ## Phase 4: Validation
 
 - [ ] Run `<typecheck command>` and `<build command>`. Both must pass.
+  - [ ] AC: `<typecheck command>` exits 0.
+  - [ ] AC: `<build command>` exits 0.
 - [ ] Run `<test command>`. All tests pass, including Phase 0 regression tests where still applicable.
+  - [ ] AC: `<test command>` exits 0 with no `.skip` or `.todo` introduced this run.
 - [ ] Verify acceptance: {criterion from Q3, in concrete observable terms}.
+  - [ ] AC: {Restate Q3 as a single observable end-to-end check the critic can verify against the diff.}
 ````
+
+> **AC syntax reminder.** Each AC is an indented (2 or more leading spaces) `- [ ] AC: <criterion>` line under its parent task. Caffeine's parser only counts top-level checkboxes as backlog tasks; ACs are checked off by the implementer as evidence accrues and verified by the `critic` subagent.
 
 ### Show + confirm + write
 
@@ -143,13 +166,14 @@ After every meaningful edit, run the verification commands in `caffeine.config.j
 
 You are about to produce a `pipeline.md` file for Caffeine. Pipeline mode tells the runner to invoke per-task stage subagents after the implementer finishes each backlog item, then run integration commands once the backlog drains, then ask the agentic decider whether to loop / done / halt.
 
-### Available stages (v0.0.3)
+### Available stages
 
-These are the registered `AgentDefinition`s in `src/main/agent/runner.ts:115`. Custom stages need code (not in scope for this skill).
+These are the bundled `agents/*.md` files; users can add or override them by dropping their own `agents/<name>.md` in the target repo.
 
-- **reviewer** — adversarial diff critique. Writes findings to STATE.md. Cheap, catches missed edge cases.
+- **reviewer** — adversarial diff critique focused on code-level issues and semantic mismatches. Writes findings to STATE.md.
 - **security** — scans diff for secrets, injection sinks, missing authz, unsafe deserialization. Writes to STATE.md.
-- **tester** — writes/updates tests for the diff, runs the test suite to confirm. Read+write to source.
+- **tester** — writes/updates tests for the diff (and the active task's ACs), runs the test suite, reports a coverage report against the ACs. Read+write to source.
+- **critic** — acceptance critic. Reads the task + its ACs + the staged diff + STATE.md and judges fit-to-intent (pass / partial / missed / ungrounded per AC). Writes structured JSON to STATE.md `## Acceptance Findings`. Runs **last** in per_task so it has the reviewer/tester/security findings to weigh. **Strongly recommended** because without it "tests pass" stops being trustworthy signal — the implementer wrote both the code and the tests.
 - **decider** — loop-control agent invoked automatically at the end of each iteration. NOT a per_task stage; auto-wired by the orchestrator.
 
 ### Auto-detect from project state
@@ -161,6 +185,7 @@ Before asking anything, derive defaults from Phase 1:
   - `reviewer` — always recommended.
   - `security` — recommended if backlog touches: auth, secrets, env vars, HTTP handlers, input parsing, deserialization, file uploads, IPC. Search the backlog text for those terms.
   - `tester` — recommended if backlog has tasks that ADD new behavior without explicit "Write `*.test.ts`" tasks of their own. Skip if the backlog already covers tests in every task.
+  - `critic` — **always recommended when BACKLOG.md tasks have acceptance criteria.** Without ACs the critic has nothing concrete to verify against, so skip and warn the user that they should rerun the backlog flow to add ACs. Place `critic` LAST in `per_task` so it can read every other stage's findings before rendering its verdict.
 
 ### Interview
 
@@ -174,6 +199,7 @@ Show the auto-detected recommendations with one-line justifications. Example:
 > - ✓ **reviewer** — always-on diff critique
 > - ✓ **security** — backlog touches `src/auth/` and `src/routes/`, security scan adds value
 > - ☐ **tester** — backlog already includes test tasks for every new function, tester would be redundant
+> - ✓ **critic** — every backlog task has 2-5 ACs; critic verifies fit-to-intent (placed last)
 >
 > Override?
 
@@ -215,7 +241,7 @@ decider:
 
 ## decider
 
-The decider is an agent (`src/main/agent/decider-agent.ts`). At the end of each iteration it reads STATE.md + the staged diff + the failed commands, then writes a structured decision to STATE.md under `## Decider Output: Iteration N`. On `loop`, it authors targeted `[LOOP-N]` task descriptions for the next iteration rather than dumping raw exit-code summaries.
+The decider is an agent (bundled at `agents/decider.md`; users may override by dropping their own `agents/decider.md` in the target repo). At the end of each iteration it reads STATE.md (including the critic's `## Acceptance Findings`) + the staged diff + the failed commands, then writes a structured decision to STATE.md under `## Decider Output: Iteration N`. On `loop`, it prefers the critic's per-AC `loop_task` strings verbatim and otherwise authors targeted `[LOOP-N]` task descriptions for the next iteration rather than dumping raw exit-code summaries.
 
 `max_iterations: {N}` caps the loop. `cost_ceiling_per_iteration_usd: 5` is a per-iteration USD budget — independent of the session-level ceiling in `caffeine.config.json`.
 ````
@@ -264,7 +290,8 @@ No filler closings. No "Let me know if you have any questions!" End with the act
 
 ## Output rules
 
-- BACKLOG.md must use GitHub-style checkbox tasks (`- [ ] task`) at the top level. Caffeine's parser only counts checkboxes; sub-bullets are decorative.
+- BACKLOG.md must use GitHub-style checkbox tasks (`- [ ] task`) at the top level. Caffeine's parser only counts top-level (zero-indent) checkboxes as tasks.
+- Acceptance criteria are indented (2+ leading spaces) `- [ ] AC: <criterion>` rows directly under their task. The literal `AC: ` prefix is the marker; nested checkboxes without it are decorative and dropped by the parser.
 - Use `## Phase N: <name>` headings to group tasks. Parser ignores them; humans rely on them.
 - pipeline.md must have valid YAML frontmatter between `---` fences at the top. Stages must match `[A-Za-z0-9_-]+`. Commands in `on_backlog_complete` must be single-line.
 - Keep the meta-context paragraphs short (4–6 sentences). The agent reads them on every iteration; bloat costs tokens.
